@@ -1,0 +1,6 @@
+# 科研矩阵表工具运行依赖
+# 安装：pip install -r requirements.txt
+requests        # GROBID API 调用
+beautifulsoup4  # TEI XML 解析（需 lxml 后端）
+lxml
+openpyxl        # xlsx 生成

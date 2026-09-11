@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "papers": {
+    "PAPER1": {
+      "b1": ["Example Method"]
+    }
+  }
+}

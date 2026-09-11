@@ -1,0 +1,41 @@
+# Python / 测试缓存
+__pycache__/
+*.py[cod]
+*.tmp
+.pytest_cache/
+
+# 本地凭据与证书
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 本地真实研究数据：不提交 PDF、解析缓存、状态、译文池和导出物
+/data/config/*
+!/data/config/README.md
+!/data/config/*.example.json
+/data/state/*
+!/data/state/.gitkeep
+!/data/state/papers/
+/data/state/papers/*
+!/data/state/papers/.gitkeep
+/data/seed_papers/*
+!/data/seed_papers/.gitkeep
+/data/exports/*
+!/data/exports/.gitkeep
+
+# 运行日志：保留变更记录，忽略每天生成的 JSON Lines 日志
+/log/*.log
+
+# 回归基线包含论文抽取内容和译文，只在本机生成
+/tests/baselines/logical_rows.json
+
+# 本机环境快照可能包含用户名和 PATH，不进版本库
+/project_memory/archive/*
+!/project_memory/archive/README.md
+
+# 旧工具计划产物
+.zcode/

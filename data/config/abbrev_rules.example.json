@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {"match": "retrieval-augmented generation", "abbr": "RAG"},
+    {"match": "example method", "abbr": "Example"}
+  ]
+}
