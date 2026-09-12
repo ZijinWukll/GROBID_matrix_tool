@@ -62,6 +62,8 @@ if load_dotenv is not None:
 SCHEMA_VERSION = 1
 PAPERS_SCHEMA_VERSION = 2   # data/state/papers/<KEY>.json 结构升级（上下文窗口 + 引用标记）
 TRANS_POOL = STATE_DIR / "translations_by_hash.json"
+RELATION_LABELS_FILE = STATE_DIR / "relation_labels.json"
+RELATION_OVERRIDES_FILE = CONFIG_DIR / "relation_label_overrides.json"
 
 COL_HEADER_COUNT = "内部提及次数"
 COL_HEADER_TOTAL = "总内部引用次数"
@@ -94,6 +96,24 @@ TRANSLATION_ENV_VARS = {
     "base_url": "MATRIX_LLM_BASE_URL",
     "api_key": "MATRIX_LLM_API_KEY",
     "model": "MATRIX_LLM_MODEL",
+}
+
+RELATION_LABELS = {
+    "B&E": {"name": "基于与拓展", "display": "【基于与拓展｜B&E】"},
+    "S&S": {"name": "支持与补充", "display": "【支持与补充｜S&S】"},
+    "C&A": {"name": "对比与替代", "display": "【对比与替代｜C&A】"},
+    "Q&A": {"name": "质疑与反驳", "display": "【质疑与反驳｜Q&A】"},
+    "M/I": {"name": "简单提及或无关", "display": "【简单提及或无关｜M/I】"},
+}
+RELATION_LABEL_PRIORITY = ["Q&A", "C&A", "B&E", "S&S", "M/I"]
+DEFAULT_RELATIONSHIP_LABELING = {
+    "enabled": True,
+    "batch_size": 8,
+    "review_threshold": 0.60,
+    "temperature": 0.0,
+    "top_p": 0.95,
+    "max_tokens": 1800,
+    "max_excerpt_chars": 2400,
 }
 
 
@@ -523,6 +543,48 @@ def is_translatable_text(text: str) -> bool:
     return bool(re.search(r"[A-Za-z]", text or ""))
 
 
+def _cell_hash(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
+
+
+def cell_source_text(info: dict) -> str:
+    """还原单元格英文原始引用段，引用句前置 ▶，并去掉内部 [[k]] 占位符。"""
+    blocks = []
+    for block in (info or {}).get("blocks", []):
+        sentences = []
+        for sentence in block.get("sentences", []):
+            text = re.sub(r"\[\[\d+\]\]", "", sentence.get("text", "")).strip()
+            if sentence.get("cite"):
+                text = "▶ " + text
+            sentences.append(text)
+        blocks.append(" ".join(s for s in sentences if s))
+    return SENT_SEP.join(b for b in blocks if b).strip()
+
+
+def normalize_relation_label(value) -> str:
+    """把代码、中文名或完整显示标签归一化为规范代码。"""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    compact = raw.replace(" ", "").upper()
+    for code, meta in RELATION_LABELS.items():
+        if compact == code.upper().replace(" ", ""):
+            return code
+        if raw == meta["name"] or raw == meta["display"]:
+            return code
+    return ""
+
+
+def relation_label_display(value) -> str:
+    code = normalize_relation_label(value)
+    return RELATION_LABELS[code]["display"] if code else ""
+
+
+def needs_relation_review(confidence: float, evidence: str, threshold: float) -> bool:
+    """仅低置信度或完全缺少依据时进入人工复核。"""
+    return float(confidence) < float(threshold) or not str(evidence or "").strip()
+
+
 def row_total(row) -> int:
     """行总次数 = 各篇"有上下文句子"的提及次数之和（与表格展示口径一致）。"""
     return sum(i["count"] for i in row["per_paper"].values() if has_context(i))
@@ -651,12 +713,14 @@ def render_block(block: dict, trans: dict) -> str:
     return " ".join(parts)
 
 
-def render_xlsx(rows_sorted: list, project: dict) -> dict:
+def render_xlsx(rows_sorted: list, project: dict, relation_labels: dict | None = None) -> dict:
     """渲染终稿 xlsx（agentmemory_1 样式）。缺译句子回退显示英文原文。
 
     返回统计 {rows, missing_trans, rule_hits, auto_hits, no_abbrev, out_path}
     """
     from openpyxl import Workbook
+    from openpyxl.cell.rich_text import CellRichText, TextBlock
+    from openpyxl.cell.text import InlineFont
     from openpyxl.styles import Alignment, Font
     from openpyxl.utils import get_column_letter
 
@@ -664,6 +728,8 @@ def render_xlsx(rows_sorted: list, project: dict) -> dict:
     headers = {k: v.get("header") or k.lower() for k, v in project["papers"].items()}
     trans = load_pool()
     rules = load_rules()
+    if relation_labels is None:
+        relation_labels = effective_relation_labels(rows_sorted, project)
 
     wb = Workbook()
     ws = wb.active
@@ -687,6 +753,13 @@ def render_xlsx(rows_sorted: list, project: dict) -> dict:
                     if is_translatable_text(s) and _hash8(s) not in trans and s not in missing_trans:
                         missing_trans.append(s)
                 cn = SENT_SEP.join(render_block(b, trans) for b in info["blocks"])
+                label_info = relation_labels.get(f"{r['id']}|{pk}") or {}
+                label_text = relation_label_display(label_info.get("label"))
+                if label_text:
+                    cn = CellRichText([
+                        TextBlock(InlineFont(rFont="宋体", sz=11, b=True), label_text),
+                        TextBlock(InlineFont(rFont="宋体", sz=11), " " + cn),
+                    ])
                 line += [cn, info["count"]]
                 total += info["count"]
             else:
@@ -741,9 +814,129 @@ def render_xlsx(rows_sorted: list, project: dict) -> dict:
     }
 
 
+def export_relation_labels(rows: list, project: dict,
+                           out_path: Path | None = None,
+                           labels: dict | None = None,
+                           quiet: bool = False,
+                           include_all: bool = False) -> Path:
+    """导出人工校对用 xlsx；人工标签列提供五类标签和“自动”下拉选项。"""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    labels = labels or {}
+    cache = load_relation_label_cache()
+    overrides = load_relation_label_overrides()
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "关系标签"
+    headers = ["row_id", "paper_key", "论文标题", "自动标签", "有效标签",
+               "来源", "置信度", "需复核", "判断依据", "人工标签", "引用段"]
+    ws.append(headers)
+
+    for row in rows:
+        for paper_key, info in row["per_paper"].items():
+            if not has_context(info):
+                continue
+            key = f"{row['id']}|{paper_key}"
+            effective = labels.get(key) or {}
+            if not include_all and not effective.get("needs_review"):
+                continue
+            auto = cache.get(key) or {}
+            manual = normalize_relation_label(overrides.get(key))
+            ws.append([
+                row["id"],
+                paper_key,
+                row.get("display_title", ""),
+                relation_label_display(auto.get("label")).strip("【】") if auto else "",
+                relation_label_display(effective.get("label")).strip("【】") if effective else "",
+                effective.get("source", "missing"),
+                effective.get("confidence", ""),
+                "是" if effective.get("needs_review") else "否",
+                effective.get("evidence", ""),
+                relation_label_display(manual).strip("【】") if manual else "",
+                cell_source_text(info),
+            ])
+
+    body_font = Font(name="宋体", size=11)
+    for cell in ws[1]:
+        cell.font = Font(name="宋体", size=11, bold=True)
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.font = body_font
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    ws.freeze_panes = "A2"
+    widths = {"A": 34, "B": 12, "C": 42, "D": 18, "E": 18, "F": 10,
+              "G": 10, "H": 9, "I": 34, "J": 20, "K": 80}
+    for letter, width in widths.items():
+        ws.column_dimensions[letter].width = width
+
+    choices = [meta["display"].strip("【】") for meta in RELATION_LABELS.values()]
+    choices.append("自动")
+    validation = DataValidation(type="list", formula1='"' + ",".join(choices) + '"',
+                                allow_blank=True)
+    validation.error = "只能选择五类标签之一，或选择“自动”清除人工覆盖。"
+    validation.errorTitle = "无效标签"
+    ws.add_data_validation(validation)
+    if ws.max_row >= 2:
+        validation.add(f"J2:J{ws.max_row}")
+
+    if out_path is None:
+        ts = now_beijing_iso_no_tz()
+        out_path = OUTPUT_DIR / f"relation_labels_{ts}.xlsx"
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(out_path)
+    if not quiet:
+        print(f"关系标签校对表已导出: {out_path}")
+    return out_path
+
+
+def parse_relation_label_import(path: Path, current_overrides: dict) -> dict:
+    """读取人工标签列；空值不动，自动清除，非法值整批拒绝。"""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(Path(path), read_only=True, data_only=True)
+    ws = wb.active
+    headers = [str(cell.value or "").strip() for cell in ws[1]]
+    required = ["row_id", "paper_key", "人工标签"]
+    missing = [name for name in required if name not in headers]
+    if missing:
+        raise ValueError("缺少必需列: " + ", ".join(missing))
+    col = {name: headers.index(name) for name in required}
+    updated = dict(current_overrides or {})
+    errors = []
+
+    for row_no, values in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        row_id = str(values[col["row_id"]] or "").strip()
+        paper_key = str(values[col["paper_key"]] or "").strip()
+        raw = str(values[col["人工标签"]] or "").strip()
+        if not row_id or not paper_key or not raw:
+            continue
+        key = f"{row_id}|{paper_key}"
+        if raw == "自动":
+            updated.pop(key, None)
+            continue
+        label = normalize_relation_label(raw)
+        if not label:
+            errors.append(f"第 {row_no} 行人工标签无效: {raw}")
+            continue
+        updated[key] = label
+
+    if errors:
+        raise ValueError("；".join(errors[:20]))
+    return updated
+
+
 def print_render_summary(stats: dict):
     print(f"  行数: {stats['rows']} | 简写: 规则命中 {stats['rule_hits']}, "
           f"自动提取 {stats['auto_hits']}, 缺 {len(stats['no_abbrev'])}")
+    if "label_auto_count" in stats:
+        print(f"  关系标签: 自动 {stats.get('label_auto_count', 0)}, "
+              f"人工 {stats.get('label_manual_count', 0)}, "
+              f"待复核 {stats.get('label_needs_review', 0)}, "
+              f"失败兜底 {stats.get('label_failed', 0)}")
     if stats["missing_trans"]:
         print(f"  [缺译] {len(stats['missing_trans'])} 句先显示英文原文，"
               f"用 export-untranslated / import-translations 回填")
@@ -797,6 +990,24 @@ def load_translation_cfg(project: dict) -> dict:
     return cfg
 
 
+def load_relationship_label_cfg(project: dict) -> dict:
+    """读取关系标签配置；模型连接信息与翻译共用 MATRIX_LLM_* 环境变量。"""
+    cfg = dict(DEFAULT_RELATIONSHIP_LABELING)
+    user = project.get("relationship_labeling") or {}
+    cfg.update({k: v for k, v in user.items() if v is not None})
+    if not cfg.get("enabled"):
+        return None
+
+    missing_env = []
+    for key, env_name in TRANSLATION_ENV_VARS.items():
+        value = (os.getenv(env_name) or "").strip()
+        if not value:
+            missing_env.append(env_name)
+        cfg[key] = value
+    cfg["missing_env"] = missing_env
+    return cfg
+
+
 def load_window_cfg(project: dict, override: tuple | None = None) -> tuple:
     """读取上下文窗口 (before, after)；override 优先（来自 --window* 命令行）。"""
     if override is not None:
@@ -823,6 +1034,32 @@ def load_pool() -> dict:
 
 def write_pool(pool: dict):
     write_json(TRANS_POOL, {"schema_version": SCHEMA_VERSION, "translations": pool})
+
+
+def load_relation_label_cache() -> dict:
+    if not RELATION_LABELS_FILE.exists():
+        return {}
+    data = load_json(RELATION_LABELS_FILE)
+    labels = data.get("labels", data) if isinstance(data, dict) else {}
+    return labels if isinstance(labels, dict) else {}
+
+
+def write_relation_label_cache(labels: dict):
+    write_json(RELATION_LABELS_FILE,
+               {"schema_version": SCHEMA_VERSION, "labels": labels})
+
+
+def load_relation_label_overrides() -> dict:
+    if not RELATION_OVERRIDES_FILE.exists():
+        return {}
+    data = load_json(RELATION_OVERRIDES_FILE)
+    overrides = data.get("overrides", data) if isinstance(data, dict) else {}
+    return overrides if isinstance(overrides, dict) else {}
+
+
+def write_relation_label_overrides(overrides: dict):
+    write_json(RELATION_OVERRIDES_FILE,
+               {"schema_version": SCHEMA_VERSION, "overrides": overrides})
 
 
 def papers_data_fresh(project: dict, quiet: bool = True, window: tuple | None = None) -> dict:
@@ -880,6 +1117,244 @@ def translate_via_llm(text: str, cfg: dict, client=None) -> str:
         return content.strip() if isinstance(content, str) else ""
     except Exception:
         return ""
+
+
+def _parse_relation_label_response(content: str, expected_ids: set[str]) -> dict:
+    try:
+        data = json.loads(content)
+    except Exception:
+        return {}
+    if isinstance(data, dict) and isinstance(data.get("items"), list):
+        items = data["items"]
+    elif isinstance(data, list):
+        items = data
+    else:
+        return {}
+
+    parsed = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id") or "").strip()
+        label = normalize_relation_label(item.get("label"))
+        if item_id not in expected_ids or not label:
+            continue
+        try:
+            confidence = float(item.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        parsed[item_id] = {
+            "label": label,
+            "confidence": max(0.0, min(1.0, confidence)),
+            "evidence": str(item.get("evidence") or "").strip(),
+        }
+    return parsed
+
+
+def _classify_relation_batch(items: list[dict], cfg: dict, client) -> dict:
+    system = """你是论文关系分类助手。只根据 excerpt 判断 current_paper（列对应种子论文）与 cited_paper（行对应被引论文）的关系，不联网，不推测 excerpt 以外的内容。
+标签只能选一个：
+基于与拓展 (B&E)：current_paper 基于、扩展、应用、受启发于 cited_paper，或推广其理论与方法。
+支持与补充 (S&S)：current_paper 通过引用、复用、补充或间接联系支持 cited_paper 的工作。
+对比与替代 (C&A)：current_paper 与 cited_paper 比较，提出替代方案，或从不同角度总结其内容。
+质疑与反驳 (Q&A)：current_paper 质疑、纠正或反驳 cited_paper 的内容。
+简单提及或无关 (M/I)：仅提及 cited_paper，或两者几乎没有直接相关性。
+冲突时严格按 Q&A > C&A > B&E > S&S > M/I 选择一个主标签。
+evidence 必须是 excerpt 中真实出现的一句短依据；无法找到直接依据时选 M/I。
+只输出 JSON 对象：{"items":[{"id":"...","label":"B&E","confidence":0.0,"evidence":"direct quote"}]}"""
+    payload = {"items": [
+        {
+            "id": item["id"],
+            "current_paper": item["current_paper"],
+            "cited_paper": item["cited_paper"],
+            "cited_year": item.get("cited_year", ""),
+            "excerpt": item["excerpt"][: int(cfg.get("max_excerpt_chars", 2400))],
+        }
+        for item in items
+    ]}
+    response = client.chat.completions.create(
+        model=cfg["model"],
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ],
+        temperature=float(cfg.get("temperature", 0)),
+        top_p=float(cfg.get("top_p", 0.95)),
+        max_tokens=int(cfg.get("max_tokens", 1800)),
+        response_format={"type": "json_object"},
+    )
+    content = response.choices[0].message.content
+    return _parse_relation_label_response(content or "", {item["id"] for item in items})
+
+
+def auto_label_missing(rows: list, project: dict, quiet: bool = False,
+                       client=None, relabel: bool = False) -> dict:
+    """按单元格引用段批量抽取关系标签，缓存自动结果并应用人工覆盖。"""
+    cfg = load_relationship_label_cfg(project)
+    empty = {"labels": {}, "auto_count": 0, "manual_count": 0,
+             "needs_review": 0, "failed": 0, "classified": 0,
+             "cached": 0, "fallback": 0}
+    if cfg is None:
+        return empty
+
+    cache = load_relation_label_cache()
+    overrides = load_relation_label_overrides()
+    new_cache = dict(cache)
+    labels = {}
+    pending = []
+    auto_count = manual_count = needs_review = cached_count = 0
+
+    for row in rows:
+        row_id = row["id"]
+        for paper_key, info in row["per_paper"].items():
+            if not has_context(info):
+                continue
+            key = f"{row_id}|{paper_key}"
+            source = cell_source_text(info)
+            source_hash = _cell_hash(source)
+            manual = normalize_relation_label(overrides.get(key))
+            if manual:
+                labels[key] = {"label": manual, "source": "manual", "confidence": 1.0,
+                               "evidence": "", "needs_review": False}
+                manual_count += 1
+                continue
+
+            existing = cache.get(key) or {}
+            existing_label = normalize_relation_label(existing.get("label"))
+            if (not relabel and existing_label
+                    and existing.get("content_hash") == source_hash):
+                review = needs_relation_review(
+                    float(existing.get("confidence", 0.0) or 0.0),
+                    existing.get("evidence", ""),
+                    float(cfg.get("review_threshold", 0.60)),
+                )
+                labels[key] = {
+                    "label": existing_label,
+                    "source": "auto",
+                    "confidence": float(existing.get("confidence", 0.0) or 0.0),
+                    "evidence": existing.get("evidence", ""),
+                    "needs_review": review,
+                }
+                new_cache[key] = dict(existing)
+                new_cache[key]["needs_review"] = review
+                auto_count += 1
+                cached_count += 1
+                if labels[key]["needs_review"]:
+                    needs_review += 1
+                continue
+
+            pending.append({
+                "id": key,
+                "current_paper": (project.get("papers", {}).get(paper_key) or {}).get("header", paper_key),
+                "cited_paper": row.get("display_title", ""),
+                "cited_year": row.get("year", ""),
+                "excerpt": source,
+                "content_hash": source_hash,
+            })
+
+    unique_pending = []
+    seen_ids = set()
+    for item in pending:
+        if item["id"] not in seen_ids:
+            seen_ids.add(item["id"])
+            unique_pending.append(item)
+    pending = unique_pending
+    failed = 0
+    classified = 0
+
+    if pending and cfg.get("missing_env"):
+        results = {}
+    else:
+        llm_client = client or build_llm_client(cfg)
+        results = {}
+        batch_size = max(1, int(cfg.get("batch_size", 8)))
+        for start in range(0, len(pending), batch_size):
+            batch = pending[start:start + batch_size]
+            try:
+                results.update(_classify_relation_batch(batch, cfg, llm_client))
+            except Exception:
+                pass
+            missing = [item for item in batch if item["id"] not in results]
+            for item in missing:
+                try:
+                    results.update(_classify_relation_batch([item], cfg, llm_client))
+                except Exception:
+                    pass
+
+    threshold = float(cfg.get("review_threshold", 0.60))
+    for item in pending:
+        key = item["id"]
+        result = results.get(key)
+        source = item["excerpt"]
+        if result:
+            label = result["label"]
+            confidence = result["confidence"]
+            evidence = result["evidence"]
+            review = needs_relation_review(confidence, evidence, threshold)
+            entry = {"label": label, "confidence": confidence, "evidence": evidence,
+                     "content_hash": item["content_hash"], "needs_review": review,
+                     "model": cfg.get("model", "")}
+            labels[key] = {"label": label, "source": "auto", "confidence": confidence,
+                           "evidence": evidence, "needs_review": review}
+            new_cache[key] = entry
+            auto_count += 1
+            classified += 1
+        else:
+            entry = {"label": "M/I", "confidence": 0.0, "evidence": "",
+                     "content_hash": item["content_hash"], "needs_review": True,
+                     "model": cfg.get("model", "")}
+            labels[key] = {"label": "M/I", "source": "fallback", "confidence": 0.0,
+                           "evidence": "", "needs_review": True}
+            new_cache[key] = entry
+            failed += 1
+            auto_count += 1
+        if labels[key]["needs_review"]:
+            needs_review += 1
+
+    write_relation_label_cache(new_cache)
+    stats = {
+        "labels": labels,
+        "auto_count": auto_count,
+        "manual_count": manual_count,
+        "needs_review": needs_review,
+        "failed": failed,
+        "classified": classified,
+        "cached": cached_count,
+        "fallback": failed,
+    }
+    if not quiet:
+        print(f"  关系标签: 自动 {auto_count}（缓存 {cached_count}, 新分类 {classified}）, "
+              f"人工 {manual_count}, 待复核 {needs_review}, 失败兜底 {failed}")
+    return stats
+
+
+def effective_relation_labels(rows: list, project: dict) -> dict:
+    """只读缓存和人工覆盖，返回当前可用于渲染/导出的有效标签。"""
+    cache = load_relation_label_cache()
+    overrides = load_relation_label_overrides()
+    labels = {}
+    for row in rows:
+        for paper_key, info in row["per_paper"].items():
+            if not has_context(info):
+                continue
+            key = f"{row['id']}|{paper_key}"
+            manual = normalize_relation_label(overrides.get(key))
+            if manual:
+                labels[key] = {"label": manual, "source": "manual", "confidence": 1.0,
+                               "evidence": "", "needs_review": False}
+                continue
+            cached = cache.get(key) or {}
+            cached_label = normalize_relation_label(cached.get("label"))
+            source_hash = _cell_hash(cell_source_text(info))
+            if cached_label and cached.get("content_hash") == source_hash:
+                labels[key] = {"label": cached_label, "source": "auto",
+                               "confidence": float(cached.get("confidence", 0.0) or 0.0),
+                               "evidence": cached.get("evidence", ""),
+                               "needs_review": bool(cached.get("needs_review"))}
+            else:
+                labels[key] = {"label": "M/I", "source": "missing", "confidence": 0.0,
+                               "evidence": "", "needs_review": True}
+    return labels
 
 
 def auto_translate_missing(rows: list, project: dict, quiet: bool = False,
@@ -945,7 +1420,7 @@ def auto_translate_missing(rows: list, project: dict, quiet: bool = False,
 
 
 def rebuild_all(project: dict, quiet: bool = False, no_translate: bool = False,
-                window: tuple | None = None):
+                window: tuple | None = None, relabel: bool = False):
     """全量重建：重抽取全部论文 → 缓存单篇 JSON → 并集 → 排序 → 渲染 xlsx。
 
     no_translate=True 时跳过自动翻译缺译句（默认自动翻译）。
@@ -959,9 +1434,11 @@ def rebuild_all(project: dict, quiet: bool = False, no_translate: bool = False,
                    {"schema_version": PAPERS_SCHEMA_VERSION, "key": key,
                     "refs_meta": data["refs_meta"], "contexts": data["contexts"]})
     rows = sort_rows(compute_rows(papers_data, load_fixes()))
+    label_stats = auto_label_missing(rows, project, quiet=quiet, relabel=relabel)
     if not no_translate:
         auto_translate_missing(rows, project, quiet=quiet)
-    stats = render_xlsx(rows, project)
+    stats = render_xlsx(rows, project, label_stats.get("labels", {}))
+    stats.update({f"label_{k}": v for k, v in label_stats.items() if k != "labels"})
     if not quiet:
         print("全表重建完成:")
         print_render_summary(stats)
@@ -1154,6 +1631,7 @@ def cmd_init(args):
         "paper_order": list(LEGACY_SEEDS.keys()),
         "papers": papers,
         "translation": dict(DEFAULT_TRANSLATION),
+        "relationship_labeling": dict(DEFAULT_RELATIONSHIP_LABELING),
         "context_window": dict(DEFAULT_CONTEXT_WINDOW),
     }
     write_json(project_path, project)
@@ -1319,7 +1797,8 @@ def cmd_add(args):
     print(f"已注册种子论文 {key}: 参考文献 {len(data['refs_meta'])} 条, "
           f"有上下文 {len(data['contexts'])} 条, 表头 = {header[:60]!r}")
 
-    rows, stats = rebuild_all(project, quiet=True, no_translate=args.no_translate, window=win)
+    rows, stats = rebuild_all(project, quiet=True, no_translate=args.no_translate,
+                              window=win, relabel=args.relabel)
 
     after = {r["id"]: r for r in rows}
     added = [i for i in after if i not in before]
@@ -1376,6 +1855,30 @@ def cmd_export(args):
     export_untranslated(load_project())
 
 
+def cmd_export_labels(args):
+    project = load_project()
+    rows = sort_rows(compute_rows(papers_data_fresh(project), load_fixes()))
+    stats = auto_label_missing(rows, project)
+    export_relation_labels(rows, project, labels=stats.get("labels", {}),
+                           include_all=args.all)
+
+
+def cmd_import_labels(args):
+    src = Path(args.file).expanduser()
+    if not src.exists():
+        src = ROOT / args.file
+    if not src.exists():
+        sys.exit(f"找不到文件: {args.file}")
+    overrides = load_relation_label_overrides()
+    try:
+        updated = parse_relation_label_import(src, overrides)
+    except ValueError as exc:
+        sys.exit(f"标签导入失败，未写入任何修改: {exc}")
+    write_relation_label_overrides(updated)
+    print(f"人工标签覆盖已更新: {len(overrides)} -> {len(updated)} 条")
+    rebuild_all(load_project())
+
+
 def cmd_import(args):
     src = Path(args.file).expanduser()
     if not src.exists():
@@ -1409,7 +1912,8 @@ def cmd_import(args):
 
 def cmd_rebuild(args):
     project = load_project()
-    rebuild_all(project, no_translate=args.no_translate, window=_cli_window(args))
+    rebuild_all(project, no_translate=args.no_translate, window=_cli_window(args),
+                relabel=args.relabel)
 
 
 def cmd_remove(args):
@@ -1444,10 +1948,17 @@ def cmd_status(args):
     uniq_missing = {s for r in rows for info in r["per_paper"].values()
                     for s in iter_sentence_texts(info)
                     if is_translatable_text(s) and _hash8(s) not in trans}
+    label_map = effective_relation_labels(rows, project)
+    label_total = len(label_map)
+    label_manual = sum(1 for item in label_map.values() if item.get("source") == "manual")
+    label_review = sum(1 for item in label_map.values() if item.get("needs_review"))
+    label_missing = sum(1 for item in label_map.values() if item.get("source") == "missing")
     no_abbrev = [r["display_title"] for r in rows if not abbrev_three_level(r["display_title"], rules)[0]]
     n_ctx = sum(1 for r in rows if r["per_paper"])
     print(f"\n当前表格: {len(rows)} 行（有上下文 {n_ctx} 行）| "
           f"缺译 {len(uniq_missing)} 句 | 缺简写 {len(no_abbrev)} 行")
+    print(f"关系标签: 单元格 {label_total} | 人工覆盖 {label_manual} | "
+          f"待复核 {label_review} | 未分类 {label_missing}")
     if no_abbrev:
         print("  缺简写行（可在 data/config/abbrev_rules.json 增补）:")
         for t in no_abbrev[:10]:
@@ -1465,7 +1976,7 @@ def cmd_status(args):
 COMMANDS_HELP = {
     "init": {
         "usage": "matrix_tool.py init [--force]",
-        "desc": "一次性迁移：生成 4 个 config、复制已有 TEI/译文池进 state，逐篇抽取并重建 xlsx，最后自检对账。",
+        "desc": "首次迁移或整体重置：生成本地配置与状态目录，逐篇抽取并重建 xlsx。",
         "args": [
             "--force    覆盖已有配置重新初始化（会优先复用 data/state 里已有的 TEI 和译文池）",
         ],
@@ -1473,14 +1984,15 @@ COMMANDS_HELP = {
         "notes": "仅首次或想整体重置时使用；日常加论文用 add，改完配置用 rebuild。",
     },
     "add": {
-        "usage": "matrix_tool.py add 新论文.pdf [--key KEY] [--force] [--from-tei 现成.tei.xml] [--no-translate] [--window N]",
-        "desc": "加一篇新种子论文：GROBID 解析（或 --from-tei 离线）→ 注册 → 抽取 → 重建 → 自动翻译缺译句。",
+        "usage": "matrix_tool.py add 新论文.pdf [--key KEY] [--force] [--from-tei 现成.tei.xml] [--no-translate] [--window N] [--relabel]",
+        "desc": "加一篇新种子论文：解析（或离线 TEI）→ 注册 → 抽取 → 关系标签 → 翻译 → 重建表格。",
         "args": [
             "pdf            种子论文 PDF（--from-tei 时可省略）",
             "--key KEY      论文短名（默认取 PDF 文件名）",
             "--force        key 已存在时强制重新解析覆盖",
             "--from-tei     离线入口：直接使用现成 TEI XML，跳过 GROBID",
             "--no-translate 跳过自动翻译缺译句（默认自动翻译）",
+            "--relabel      强制重新分类全部非人工关系标签",
             "--window N     上下文窗口：前后各 N 句（0=只显示引用句）",
             "--window-before / --window-after  分别指定前后句数",
         ],
@@ -1488,15 +2000,16 @@ COMMANDS_HELP = {
         "notes": "需连校园 VPN 使 GROBID 可达；无 VPN 可用 --from-tei 加论文 / 冒烟测试。",
     },
     "rebuild": {
-        "usage": "matrix_tool.py rebuild [--no-translate] [--window N] [--window-before N] [--window-after N]",
-        "desc": "全量重建：从 TEI 重新抽取全部论文 → 上下文窗口 → 并集 → 按总次数降序 → 回填译文 → 写 xlsx；同时自动补齐缺译句。",
+        "usage": "matrix_tool.py rebuild [--no-translate] [--window N] [--window-before N] [--window-after N] [--relabel]",
+        "desc": "全量重建：抽取 → 排序 → 关系标签 → 自动翻译 → 写 xlsx；只处理新增或失效缓存。",
         "args": [
             "--no-translate 跳过自动翻译缺译句（默认自动翻译）",
             "--window N     上下文窗口：前后各 N 句（覆盖 config，0=只显示引用句）",
             "--window-before / --window-after  分别指定前后句数",
+            "--relabel      强制重新分类全部非人工关系标签",
         ],
         "example": "matrix_tool.py rebuild",
-        "notes": "改过任何 data/config/*.json 或译文后跑它；xlsx 只是导出物，永远不要手改。",
+        "notes": "改过 data/config、译文或标签后跑它；关系标签先于自动翻译；xlsx 只是导出物，永远不要手改。",
     },
     "export-untranslated": {
         "usage": "matrix_tool.py export-untranslated",
@@ -1514,6 +2027,24 @@ COMMANDS_HELP = {
         "example": "matrix_tool.py import-translations data/exports/untranslated_20260905_123634.json",
         "notes": "用于人工精修/校对：把 export 的 json 里英文值改成中文，键（8 位 hash）保持不变。",
     },
+    "export-labels": {
+        "usage": "matrix_tool.py export-labels [--all]",
+        "desc": "导出关系标签人工校对表（默认仅待复核项，含下拉选项、置信度、需复核和引用段）。",
+        "args": [
+            "--all  导出全部单元格，而不仅是待复核项",
+        ],
+        "example": "matrix_tool.py export-labels",
+        "notes": "人工标签列可填五类标签或“自动”；保存后用 import-labels 回填。",
+    },
+    "import-labels": {
+        "usage": "matrix_tool.py import-labels 校对表.xlsx",
+        "desc": "导入人工关系标签覆盖并自动 rebuild；非法标签整批拒绝。",
+        "args": [
+            "file  export-labels 导出的 xlsx（只需修改“人工标签”列）",
+        ],
+        "example": "matrix_tool.py import-labels data/exports/relation_labels_20260912_120000.xlsx",
+        "notes": "留空不修改，选择“自动”清除人工覆盖；人工覆盖优先于模型结果。",
+    },
     "remove": {
         "usage": "matrix_tool.py remove KEY",
         "desc": "注销某篇种子论文（删其状态文件）并重建——加错了用来纠正。",
@@ -1525,7 +2056,7 @@ COMMANDS_HELP = {
     },
     "status": {
         "usage": "matrix_tool.py status",
-        "desc": "查看现状：种子论文列表、当前行数、缺译句数、缺简写行清单、最高被引。",
+        "desc": "查看现状：种子论文、行数、缺译句、缺简写、关系标签与待复核数量。",
         "args": [],
         "example": "matrix_tool.py status",
         "notes": "改动任何 .py、data/config 或 data/state 后跑一次，确认无回归。",
@@ -1533,13 +2064,36 @@ COMMANDS_HELP = {
 }
 
 
+COMMAND_GROUPS = [
+    ("日常流程", ["status", "add", "rebuild"]),
+    ("标签与翻译", ["export-labels", "import-labels", "export-untranslated", "import-translations"]),
+    ("维护", ["init", "remove"]),
+]
+
+HELP_QUICKSTART = [
+    "conda activate matrix",
+    "python matrix_tool.py status",
+    "python matrix_tool.py add data/seed_papers/新论文.pdf",
+    "python matrix_tool.py rebuild",
+    "python matrix_tool.py export-labels",
+    "python matrix_tool.py import-labels data/exports/relation_labels_时间戳.xlsx",
+]
+
+
 def cmd_help(args):
     """项目专属中文帮助。无参：列出所有命令；带 cmd：展开单个命令详解。"""
     if not args.cmd:
-        print("可用命令：")
-        for name, info in COMMANDS_HELP.items():
-            print(f"  {name:<24}{info['desc']}")
-        print(f"\n想看某命令的用法/参数/示例：matrix_tool.py help 命令名")
+        print("科研矩阵表生长工具\n")
+        print("快速开始：")
+        for i, command in enumerate(HELP_QUICKSTART, start=1):
+            print(f"  {i}. {command}")
+        for group, names in COMMAND_GROUPS:
+            print(f"\n{group}：")
+            for name in names:
+                info = COMMANDS_HELP[name]
+                print(f"  {name:<20}{info['desc']}")
+        print("\n查看命令详情：matrix_tool.py help 命令名")
+        print("示例：matrix_tool.py help rebuild")
         return
 
     name = args.cmd
@@ -1567,7 +2121,7 @@ def main(argv=None):
         prog="matrix_tool.py", description="科研矩阵表生长工具")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("init", help="首次迁移现有 3 篇种子并自检对账")
+    p = sub.add_parser("init", help="首次迁移或重置项目配置与状态")
     p.add_argument("--force", action="store_true", help="覆盖已有配置重新初始化")
     p.set_defaults(func=cmd_init)
 
@@ -1581,14 +2135,16 @@ def main(argv=None):
     p.add_argument("--window", type=int, help="上下文窗口：前后各 N 句（覆盖 config，0=只显示引用句）")
     p.add_argument("--window-before", type=int, dest="window_before", help="引用句前 N 句")
     p.add_argument("--window-after", type=int, dest="window_after", help="引用句后 N 句")
+    p.add_argument("--relabel", action="store_true", help="强制重新分类所有非人工关系标签")
     p.set_defaults(func=cmd_add)
 
-    p = sub.add_parser("rebuild", help="全量重建表格（改过 data/config 或译文后运行）")
+    p = sub.add_parser("rebuild", help="全量重建表格（关系标签、翻译和导出）")
     p.add_argument("--no-translate", action="store_true",
                    help="跳过自动翻译缺译句（默认自动翻译）")
     p.add_argument("--window", type=int, help="上下文窗口：前后各 N 句（覆盖 config，0=只显示引用句）")
     p.add_argument("--window-before", type=int, dest="window_before", help="引用句前 N 句")
     p.add_argument("--window-after", type=int, dest="window_after", help="引用句后 N 句")
+    p.add_argument("--relabel", action="store_true", help="强制重新分类所有非人工关系标签")
     p.set_defaults(func=cmd_rebuild)
 
     p = sub.add_parser("export-untranslated", help="导出缺译句子清单")
@@ -1597,6 +2153,14 @@ def main(argv=None):
     p = sub.add_parser("import-translations", help="回填译文并重建")
     p.add_argument("file", help="译文 JSON：{hash: 中文} 或 {英文原句: 中文}")
     p.set_defaults(func=cmd_import)
+
+    p = sub.add_parser("export-labels", help="导出关系标签人工校对表")
+    p.add_argument("--all", action="store_true", help="导出全部单元格（默认仅待复核项）")
+    p.set_defaults(func=cmd_export_labels)
+
+    p = sub.add_parser("import-labels", help="导入人工关系标签覆盖并重建")
+    p.add_argument("file", help="export-labels 导出的 xlsx")
+    p.set_defaults(func=cmd_import_labels)
 
     p = sub.add_parser("remove", help="注销某篇种子论文并重建")
     p.add_argument("key")

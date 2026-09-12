@@ -10,3 +10,5 @@ Copy-Item data/config/display_title_fixes.example.json data/config/display_title
 ```
 
 示例中的论文名、文件名和数据路径均为占位内容，不包含任何本机研究数据。
+
+人工关系标签覆盖保存在本地 `relation_label_overrides.json`。该文件由 `import-labels` 自动写入，格式可参考 `relation_label_overrides.example.json`。

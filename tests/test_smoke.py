@@ -78,6 +78,11 @@ def test_rebuild_on_a_temporary_copy_creates_xlsx_and_daily_log(
     }
     for name, value in patched.items():
         monkeypatch.setattr(mt, name, value)
+    monkeypatch.setattr(
+        mt,
+        "auto_label_missing",
+        lambda rows, project, quiet=False, client=None, relabel=False: {"labels": {}},
+    )
 
     mt.main(["rebuild", "--no-translate"])
 

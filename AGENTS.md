@@ -1,109 +1,150 @@
 # AGENTS.md
 
-请使用中文回答所有问题和交流。与用户的互动、代码解释、错漏消息和建议都使用中文。
+请使用中文回答所有问题和交流，包括代码解释、错误提示、操作建议和提交说明。
 
 ---
 
-# 项目引导（Agents / 接管说明）
+# 项目维护说明
 
-## 项目是什么
+## 项目定位
 
-**科研矩阵表生长工具**：把“种子论文 → GROBID 解析 → 引用上下文抽取 → 矩阵表”流水线改造成可重复生长的工具。每加一篇种子论文，工具会解析、抽取、跨论文去重合并，并按总内部引用次数降序重建整张 xlsx。
+科研矩阵表生长工具把种子论文持续整理成可重建的引用矩阵表：
 
-根目录 `matrix_tool.py` 是兼容 CLI 入口，核心实现位于 `src/matrix_tool.py`。抽取、合并、排序和渲染核心保持为纯函数；CLI 层负责参数、网络、文件 I/O 和日志。
+`PDF/TEI → GROBID → 引用上下文 → 关系标签 → 中文翻译 → xlsx`
 
-## 铁则
+根目录 `matrix_tool.py` 是兼容 CLI 入口，核心实现在 `src/matrix_tool.py`。抽取、合并、排序和渲染核心尽量保持纯函数；CLI 层负责参数、网络、文件 I/O 和日志。
 
-1. **xlsx 只是导出物**，手改会在下一次 `rebuild` 被覆盖。
-2. **`data/state/papers/<KEY>.json` 是唯一事实源**，整张表每次 `rebuild` 都从它重新计算。
-3. **译文按内容哈希键**，键为 `md5(英文句)[:8]`；原文不变则译文不会丢。
-4. **配置和数据保持 git 友好**：UTF-8 无 BOM、项目根相对路径、无易变时间戳、原子写入。
-5. 行 ID 使用归一化标题；批注、人工覆盖和行合并将来都应按 ID 定位。
-6. 不手工生成或修改 `data/exports/` 中的成品来修正数据；修正只进 `data/config/`、`data/state/` 和译文池。
+## 必须遵守
+
+1. `data/state/papers/<KEY>.json` 是矩阵数据的事实源，`data/exports/` 中的 xlsx 只是导出物。
+2. 不手工修改最终 xlsx；修正只进 `data/config/`、`data/state/` 或人工覆盖文件，然后运行 `rebuild`。
+3. 译文按英文句子 md5 前 8 位缓存；关系标签按 `row_id|paper_key` 和引用段内容哈希缓存。
+4. 人工标签、人工译文优先级最高，不能被自动结果覆盖。
+5. `.env`、密钥、证书、真实研究数据、标签缓存、回归基线和运行日志不进入 Git。
+6. 修改代码、配置、状态或文档后，至少运行 `python matrix_tool.py status` 和 `python -m pytest -q`。
 
 ## 目录结构
 
 ```text
 Grobid_Demo_Codes/
-├── matrix_tool.py                  # 兼容入口：python matrix_tool.py ...
+├── matrix_tool.py                  # 兼容入口
 ├── src/
 │   ├── matrix_tool.py              # 核心实现
 │   └── util_get_current_time.py
 ├── tests/
-│   ├── test_smoke.py               # 冒烟测试
-│   ├── test_regression.py          # 逻辑结果回归
-│   └── baselines/logical_rows.json # 重构前冻结基线
-├── scripts/                        # PowerShell / Bash 命令封装
+│   ├── test_smoke.py
+│   ├── test_regression.py
+│   ├── test_translation_llm.py
+│   ├── test_relation_labels.py
+│   └── test_help.py
+├── scripts/                        # PS1 / Bash 薄封装
 ├── data/
-│   ├── config/                     # project.json、规则和修正表
-│   ├── state/papers/               # TEI 缓存 + 抽取 JSON
-│   ├── seed_papers/                # PDF 投放区
-│   └── exports/                    # xlsx、未翻译清单等导出物
+│   ├── config/                     # 本地配置、规则、人工标签覆盖
+│   ├── state/                      # TEI、抽取 JSON、译文池、标签缓存
+│   ├── seed_papers/                # 种子 PDF
+│   └── exports/                    # xlsx、标签复核表、缺译清单
+├── manual_files/                   # 操作、配置、排障、开发手册
 ├── project_memory/                 # 架构、决策、迁移记录
 ├── road_map/                       # 路线图、时间线、待办
-├── manual_files/                   # 专题操作手册
-├── log/                            # CHANGELOG + 按日运行日志
-├── README.md                       # 项目入口
-└── requirements*.txt
+├── log/                            # CHANGELOG + 按日日志
+└── README.md
 ```
 
-## 运行环境
+## 首次配置
 
-- 运行前激活本机 conda/miniconda 环境；脚本可用环境变量 `MATRIX_PYTHON` 指定解释器，不把本机绝对路径写入仓库。
-- 运行依赖见 `requirements.txt`；测试依赖见 `requirements-dev.txt`。
-- 自动翻译通过 OpenAI 兼容接口调用本地 vLLM，连接参数只从 `.env` 读取：`MATRIX_LLM_BASE_URL`、`MATRIX_LLM_API_KEY`、`MATRIX_LLM_MODEL`；不得写进源码或提交 `.env`。
-- GROBID 地址在本地 `data/config/project.json` 中配置；代码示例默认 `http://localhost:8070`，联网调用前需确保 VPN 或内网可达。
-- `add X.pdf --from-tei 现成.tei.xml` 是离线入口，无 VPN 也能加论文或做冒烟测试。
-- `add` / `rebuild` 默认自动翻译缺译句；`--no-translate` 跳过；`init` / `import-translations` / `remove` 不触发自动翻译。
+```powershell
+conda activate matrix
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+python matrix_tool.py status
+```
+
+`.env` 使用以下变量，源码中不得硬编码真实值：
+
+```dotenv
+MATRIX_LLM_BASE_URL=http://your-llm-host:8900/v1
+MATRIX_LLM_API_KEY=EMPTY
+MATRIX_LLM_MODEL=your-model-id
+```
+
+## 标准工作流
+
+### 加论文
+
+```powershell
+python matrix_tool.py add data/seed_papers/新论文.pdf
+python matrix_tool.py add data/seed_papers/新论文.pdf --from-tei 现成.tei.xml
+```
+
+### 重建
+
+```powershell
+python matrix_tool.py rebuild
+python matrix_tool.py rebuild --no-translate
+python matrix_tool.py rebuild --relabel
+```
+
+重建顺序固定为：抽取 → 合并排序 → 关系标签 → 自动翻译 → 写 xlsx。`--relabel` 只强制重算非人工标签，人工覆盖保留。
+
+### 标签复核
+
+```powershell
+python matrix_tool.py export-labels
+python matrix_tool.py import-labels data/exports/relation_labels_时间戳.xlsx
+```
+
+默认只导出待复核项；全部导出使用 `export-labels --all`。人工只需编辑“人工标签”列：留空不修改，选择“自动”清除覆盖，其他值覆盖自动标签。
+
+### 译文维护
+
+```powershell
+python matrix_tool.py export-untranslated
+python matrix_tool.py import-translations data/exports/untranslated_时间戳.json
+```
 
 ## 命令速查
 
 | 命令 | 作用 |
 | --- | --- |
-| `status` | 查看种子、行数、缺译句和缺简写行 |
-| `add data/seed_papers/新论文.pdf` | GROBID 解析、注册、抽取、重建、自动补译 |
-| `add ... --from-tei 文件.tei.xml` | 离线加入论文 |
-| `rebuild [--no-translate] [--window N]` | 全量重建；默认自动补译 |
-| `export-untranslated` | 导出缺译清单到 `data/exports/` |
-| `import-translations 文件.json` | 回填译文并自动重建 |
+| `status` | 查看论文、行数、缺译、缺简写、标签复核状态 |
+| `add` | 加论文并自动完成标签、翻译、重建 |
+| `rebuild` | 全量增量重建；支持 `--relabel`、`--no-translate` |
+| `export-labels [--all]` | 导出标签复核表 |
+| `import-labels 文件.xlsx` | 导入人工标签并重建 |
+| `export-untranslated` | 导出缺译句子 |
+| `import-translations 文件.json` | 回填人工译文并重建 |
 | `remove KEY` | 注销种子论文并重建 |
-| `help [命令名]` | 查看项目专属中文帮助 |
+| `init [--force]` | 首次迁移或重置 |
+| `help [命令名]` | 查看快速上手、命令分组或单命令详情 |
 
-PowerShell 示例：
+修改帮助系统时，同步维护 `COMMANDS_HELP`、`COMMAND_GROUPS`、`HELP_QUICKSTART` 和 `tests/test_help.py`。
 
-```powershell
-conda activate matrix
-python matrix_tool.py status
-```
+## 配置修正入口
 
-## 修正指南（改文件后跑 rebuild）
-
-| 想改什么 | 改哪里 |
+| 目标 | 文件 |
 | --- | --- |
-| 方法简写不对或缺失 | `data/config/abbrev_rules.json` 增加规则，靠前优先 |
-| 正文提到但次数为 0 | `data/config/alias_mentions.json` 补别名 |
-| 标题连字符等显示错误 | `data/config/display_title_fixes.json` |
-| 列顺序、表头、输出文件名、GROBID 地址 | `data/config/project.json` |
-| 自动翻译配置 | `data/config/project.json` 的 `translation` 段 |
-| 上下文窗口 | `data/config/project.json` 的 `context_window` 或 `rebuild --window N` |
+| 论文顺序、表头、路径、模型参数 | `data/config/project.json` |
+| 方法简写 | `data/config/abbrev_rules.json` |
+| 漏标引用提及 | `data/config/alias_mentions.json` |
+| 标题显示修复 | `data/config/display_title_fixes.json` |
+| 人工关系标签 | `data/config/relation_label_overrides.json`，优先通过 `import-labels` 修改 |
 
-## 两个“别名”的区别
-
-- `data/config/alias_mentions.json`：数据层补救，补 GROBID 漏打的引用提及，会改变次数和上下文。
-- `data/config/abbrev_rules.json`：显示层标签，只决定方法简写列，不改次数和上下文。
+`alias_mentions.json` 改变次数和上下文；`abbrev_rules.json` 只改变方法简写显示，二者不要混淆。
 
 ## 测试与日志
 
-- 改动任何 `.py`、配置或状态后运行 `python matrix_tool.py status` 和 `python -m pytest -q`。
-- 回归基线位于 `tests/baselines/logical_rows.json`；修改核心算法前先确认基线语义，不要为了通过测试随意改基线。
-- 运行日志位于 `log/matrix_tool_YYYYMMDD.log`，为 JSON Lines；不得记录论文全文、引用上下文或整段译文。
-- `log/CHANGELOG.md` 是版本变更记录，运行日志本身不纳入版本管理。
-- 真实 `data/config/*.json`、`data/state/`、种子 PDF、导出物、回归基线和本机归档默认由 `.gitignore` 排除；提交前必须检查暂存区。
-- `.env`、密钥、证书和本机模型地址不得提交；仓库只维护 `.env.example`。
+```powershell
+python -m pytest -q
+```
 
-## 维护注意
+- 回归基线为 `tests/baselines/logical_rows.json`，由本机数据生成，不提交 Git。
+- 缺少私有基线时，相关测试自动跳过。
+- 运行日志写入 `log/matrix_tool_YYYYMMDD.log`，使用 JSON Lines，不记录论文正文、引用段或译文。
+- `log/CHANGELOG.md` 记录需要提交的版本变化。
 
-- 修改路径或目录结构时同步更新 README、AGENTS、manual_files 和测试。
-- 编辑器包导出告警不等同于运行错误；以终端命令和 pytest 结果为准。
-- 自动翻译失败时缺译句保留英文原文，出表不受影响；网络恢复后再次 `rebuild` 自动补齐。
-- 历史资料和旧环境快照放在 `project_memory/archive/`，不与当前运行数据混放。
+## 发布与隐私
+
+- 提交前运行 `git status --short` 和 `git diff --cached --stat`。
+- 不要使用 `git add -f` 添加被忽略的本地数据。
+- 公开仓库只应包含源码、测试、文档、目录占位、脱敏示例配置和 `requirements*.txt`。
+- 真实 `.env`、PDF、TEI、抽取状态、译文池、标签缓存、人工覆盖、导出物、日志和本机归档均不提交。

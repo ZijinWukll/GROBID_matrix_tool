@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "overrides": {
+    "example_normalized_title|PAPER1": "B&E"
+  }
+}

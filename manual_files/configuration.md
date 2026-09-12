@@ -1,24 +1,47 @@
-# 配置与修正
+# 配置说明
 
-配置文件集中在 `data/config/`：
+## 本地模型环境
 
-| 文件 | 用途 |
+真实连接信息放在 `.env`，不要写入源码：
+
+```dotenv
+MATRIX_LLM_BASE_URL=http://your-llm-host:8900/v1
+MATRIX_LLM_API_KEY=EMPTY
+MATRIX_LLM_MODEL=your-model-id
+```
+
+可使用 `Copy-Item .env.example .env` 创建。`.env` 已被 Git 忽略。
+
+## 项目配置
+
+`data/config/project.json` 主要字段：
+
+| 字段 | 用途 |
 | --- | --- |
-| `project.json` | 论文顺序、PDF/TEI 路径、表头、GROBID、翻译配置、上下文窗口 |
-| `abbrev_rules.json` | 方法简写显示规则，靠前规则优先 |
-| `alias_mentions.json` | 补 GROBID 漏标的正文提及，影响次数和上下文 |
-| `display_title_fixes.json` | 标题连字符等显示修复 |
+| `paper_order` | 表格列顺序 |
+| `papers` | 论文 key、PDF、TEI、表头和加入日期 |
+| `grobid_url` | GROBID 服务地址 |
+| `output_path` | 最终 xlsx 输出路径 |
+| `translation` | 翻译开关、超时、批次和单次上限 |
+| `relationship_labeling` | 关系标签批次、复核阈值和引用段长度 |
+| `context_window` | 引用句前后句数 |
 
-修改任何配置文件后运行 `matrix_tool.py rebuild`。`abbrev_rules.json` 只影响显示层；`alias_mentions.json` 会改变数据结果，两者不要混淆。
+关系标签默认配置：
 
-上下文窗口默认前后各 2 句，可通过 `project.json` 的 `context_window` 或命令行的 `--window`、`--window-before`、`--window-after` 覆盖。
+| 字段 | 默认值 | 含义 |
+| --- | --- | --- |
+| `enabled` | `true` | 是否自动分类 |
+| `batch_size` | `8` | 每次 LLM 请求的单元格数 |
+| `review_threshold` | `0.60` | 低于该值进入人工复核 |
+| `max_excerpt_chars` | `2400` | 单个引用段送入模型的最大字符数 |
 
-自动翻译由 `project.json` 的 `translation` 段控制，但模型连接信息不在 JSON 中硬编码，统一从 `.env` 读取：
+## 修正入口
 
-| 环境变量 | 用途 |
+| 要改什么 | 改哪里 |
 | --- | --- |
-| `MATRIX_LLM_BASE_URL` | OpenAI 兼容接口地址，通常以 `/v1` 结尾 |
-| `MATRIX_LLM_API_KEY` | 本地 vLLM 可填 `EMPTY`，真实密钥不得提交 |
-| `MATRIX_LLM_MODEL` | 服务端模型 ID，例如 `Qwen2p5` |
+| 方法简写 | `data/config/abbrev_rules.json` |
+| GROBID 漏标引用 | `data/config/alias_mentions.json` |
+| 标题显示 | `data/config/display_title_fixes.json` |
+| 人工关系标签 | `data/config/relation_label_overrides.json`，推荐通过 `import-labels` 修改 |
 
-关闭自动翻译后将保留英文原文并计入缺译统计；临时跳过使用 `--no-translate`。
+修改配置后运行 `python matrix_tool.py rebuild`。`abbrev_rules.json` 只改显示，`alias_mentions.json` 会改变次数和上下文。

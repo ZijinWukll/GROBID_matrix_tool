@@ -27,3 +27,7 @@
 ## D-007：自动翻译改走本地 vLLM
 
 不再使用 MyMemory。翻译请求通过 OpenAI 兼容接口发送到学校本地模型，连接地址、密钥和模型 ID 由 `.env` 中的 `MATRIX_LLM_BASE_URL`、`MATRIX_LLM_API_KEY`、`MATRIX_LLM_MODEL` 提供；源码只读取环境变量。
+
+## D-008：引用关系采用整格单主标签
+
+每个非空引用段单元格显示一个 `【中文名｜代码】` 主标签，关系方向固定为列论文到行论文。冲突按 `Q&A > C&A > B&E > S&S > M/I` 选择，M/I 作为兜底。模型结果按内容哈希缓存，置信度低于 0.60 或 evidence 完全缺失时进入人工复核清单；`export-labels` 默认只导出待复核项。人工覆盖优先且不会被 rebuild 覆盖。

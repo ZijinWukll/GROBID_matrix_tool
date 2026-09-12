@@ -15,6 +15,15 @@
     "delay": 0.0,
     "max_per_run": 500
   },
+  "relationship_labeling": {
+    "enabled": true,
+    "batch_size": 8,
+    "review_threshold": 0.6,
+    "temperature": 0.0,
+    "top_p": 0.95,
+    "max_tokens": 1800,
+    "max_excerpt_chars": 2400
+  },
   "context_window": {
     "before": 2,
     "after": 2
