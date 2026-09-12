@@ -8,6 +8,7 @@
 - 新增 `export-labels` / `import-labels` 人工校对闭环和 `rebuild --relabel`。
 - 复核阈值调整为 0.60，默认只导出待复核单元格；全量导出使用 `--all`。
 - 重写 README、AGENTS 和专题手册，帮助首页增加快速开始与命令分组。
+- GROBID 地址迁移到 `.env` 的 `MATRIX_GROBID_URL`，示例配置不再保存学校 IP。
 
 ## 2026-09-12 - 本地 LLM 翻译
 

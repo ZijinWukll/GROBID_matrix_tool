@@ -62,10 +62,13 @@ python matrix_tool.py status
 `.env` 使用以下变量，源码中不得硬编码真实值：
 
 ```dotenv
+MATRIX_GROBID_URL=http://your-grobid-host:8070
 MATRIX_LLM_BASE_URL=http://your-llm-host:8900/v1
 MATRIX_LLM_API_KEY=EMPTY
 MATRIX_LLM_MODEL=your-model-id
 ```
+
+GROBID 地址只从 `MATRIX_GROBID_URL` 读取；旧配置中的 `grobid_url` 仅作为兼容回落，不再是标准入口。
 
 ## 标准工作流
 

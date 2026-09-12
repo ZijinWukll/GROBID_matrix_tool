@@ -18,4 +18,5 @@
 - 路径统一以项目根为基准解析，配置中的 PDF、TEI 和输出路径使用 `data/...` 相对路径。
 - CLI 日志只写结构化事件，不记录论文正文、引用上下文或整段译文。
 - 自动翻译通过 OpenAI 兼容客户端访问本地 vLLM；地址、密钥和模型 ID 只从 `.env` / 环境变量读取。
+- GROBID 地址只从 `.env` 的 `MATRIX_GROBID_URL` 读取；学校真实地址不写入源码、示例配置或文档。
 - 关系标签在翻译前按单元格批量分类，缓存于 `data/state/relation_labels.json`；人工覆盖保存在 `data/config/relation_label_overrides.json`，优先级高于模型结果。

@@ -5,6 +5,7 @@
 真实连接信息放在 `.env`，不要写入源码：
 
 ```dotenv
+MATRIX_GROBID_URL=http://your-grobid-host:8070
 MATRIX_LLM_BASE_URL=http://your-llm-host:8900/v1
 MATRIX_LLM_API_KEY=EMPTY
 MATRIX_LLM_MODEL=your-model-id
@@ -20,7 +21,6 @@ MATRIX_LLM_MODEL=your-model-id
 | --- | --- |
 | `paper_order` | 表格列顺序 |
 | `papers` | 论文 key、PDF、TEI、表头和加入日期 |
-| `grobid_url` | GROBID 服务地址 |
 | `output_path` | 最终 xlsx 输出路径 |
 | `translation` | 翻译开关、超时、批次和单次上限 |
 | `relationship_labeling` | 关系标签批次、复核阈值和引用段长度 |

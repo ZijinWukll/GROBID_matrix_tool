@@ -97,6 +97,7 @@ TRANSLATION_ENV_VARS = {
     "api_key": "MATRIX_LLM_API_KEY",
     "model": "MATRIX_LLM_MODEL",
 }
+GROBID_ENV_VAR = "MATRIX_GROBID_URL"
 
 RELATION_LABELS = {
     "B&E": {"name": "基于与拓展", "display": "【基于与拓展｜B&E】"},
@@ -1008,6 +1009,14 @@ def load_relationship_label_cfg(project: dict) -> dict:
     return cfg
 
 
+def load_grobid_url(project: dict | None = None) -> str:
+    """优先从环境变量读取 GROBID 地址，仅为旧配置保留项目字段回落。"""
+    value = (os.getenv(GROBID_ENV_VAR) or "").strip()
+    if value:
+        return value
+    return str((project or {}).get("grobid_url") or "").strip()
+
+
 def load_window_cfg(project: dict, override: tuple | None = None) -> tuple:
     """读取上下文窗口 (before, after)；override 优先（来自 --window* 命令行）。"""
     if override is not None:
@@ -1626,7 +1635,6 @@ def cmd_init(args):
 
     project = {
         "schema_version": SCHEMA_VERSION,
-        "grobid_url": "http://localhost:8070",
         "output_path": "data/exports/科研矩阵表_AgentMemory.xlsx",
         "paper_order": list(LEGACY_SEEDS.keys()),
         "papers": papers,
@@ -1750,7 +1758,9 @@ def cmd_add(args):
         tei_text = tei_src.read_text(encoding="utf-8")
         print(f"使用现成 TEI: {tei_src}")
     else:
-        base = project.get("grobid_url", "")
+        base = load_grobid_url(project)
+        if not base:
+            sys.exit(f"未配置 GROBID 地址 —— 请在 .env 中设置 {GROBID_ENV_VAR}")
         try:
             alive = grobid_alive(base)
         except Exception as e:
@@ -1933,7 +1943,7 @@ def cmd_remove(args):
 
 def cmd_status(args):
     project = load_project()
-    print(f"输出文件: {project.get('output_path')} | GROBID: {project.get('grobid_url')}")
+    print(f"输出文件: {project.get('output_path')} | GROBID: {load_grobid_url(project) or '未配置'}")
     print(f"种子论文 {len(project['paper_order'])} 篇:")
     for key in project["paper_order"]:
         info = project["papers"][key]

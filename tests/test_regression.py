@@ -23,7 +23,6 @@ def _logical_snapshot(mt) -> dict:
     return {
         "project": {
             "schema_version": project["schema_version"],
-            "grobid_url": project["grobid_url"],
             "paper_order": project["paper_order"],
             "papers": {
                 key: {
@@ -33,6 +32,7 @@ def _logical_snapshot(mt) -> dict:
                 for key, info in project["papers"].items()
             },
             "translation": project["translation"],
+            "relationship_labeling": project.get("relationship_labeling", {}),
             "context_window": project["context_window"],
         },
         "translations": mt.load_pool(),

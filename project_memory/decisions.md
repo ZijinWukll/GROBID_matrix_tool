@@ -31,3 +31,7 @@
 ## D-008：引用关系采用整格单主标签
 
 每个非空引用段单元格显示一个 `【中文名｜代码】` 主标签，关系方向固定为列论文到行论文。冲突按 `Q&A > C&A > B&E > S&S > M/I` 选择，M/I 作为兜底。模型结果按内容哈希缓存，置信度低于 0.60 或 evidence 完全缺失时进入人工复核清单；`export-labels` 默认只导出待复核项。人工覆盖优先且不会被 rebuild 覆盖。
+
+## D-009：学校服务器地址统一放入 `.env`
+
+GROBID 使用 `MATRIX_GROBID_URL`，本地 vLLM 使用 `MATRIX_LLM_BASE_URL`、`MATRIX_LLM_API_KEY` 和 `MATRIX_LLM_MODEL`。脚本、示例配置和文档不保存学校真实 IP；旧 project 字段仅保留兼容回落。

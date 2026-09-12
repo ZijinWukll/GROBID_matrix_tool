@@ -1,6 +1,5 @@
 {
   "schema_version": 1,
-  "grobid_url": "http://localhost:8070",
   "output_path": "data/exports/matrix.xlsx",
   "paper_order": ["PAPER1"],
   "translation": {

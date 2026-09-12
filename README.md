@@ -25,6 +25,7 @@ Copy-Item .env.example .env
 `.env` 示例：
 
 ```dotenv
+MATRIX_GROBID_URL=http://your-grobid-host:8070
 MATRIX_LLM_BASE_URL=http://your-llm-host:8900/v1
 MATRIX_LLM_API_KEY=EMPTY
 MATRIX_LLM_MODEL=your-model-id
@@ -136,7 +137,8 @@ Grobid_Demo_Codes/
 3. 译文按英文句子的 md5 前 8 位缓存，原文不变则译文不会丢。
 4. 关系标签按 `<row_id>|<paper_key>` 和引用段内容哈希缓存。
 5. 人工标签和人工译文优先于自动结果。
-6. `data/config/`、`data/state/`、`data/seed_papers/`、`data/exports/`、`.env` 和运行日志默认不提交 Git。
+6. GROBID 和本地 LLM 地址统一放在 `.env`，脚本和示例配置不保存学校真实地址。
+7. `data/config/`、`data/state/`、`data/seed_papers/`、`data/exports/`、`.env` 和运行日志默认不提交 Git。
 
 ## 文档导航
 

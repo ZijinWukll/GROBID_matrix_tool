@@ -10,7 +10,7 @@ python matrix_tool.py help import-labels
 
 ## GROBID 不可达
 
-连接校园 VPN，确认 `project.json` 的 `grobid_url` 可达。离线时用 `add ... --from-tei`。
+连接校园 VPN，确认 `.env` 中的 `MATRIX_GROBID_URL` 可达。离线时用 `add ... --from-tei`。
 
 ## 本地模型或翻译失败
 
