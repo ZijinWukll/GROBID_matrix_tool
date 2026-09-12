@@ -4,13 +4,15 @@
   "output_path": "data/exports/matrix.xlsx",
   "paper_order": ["PAPER1"],
   "translation": {
-    "engine": "mymemory",
-    "endpoint": "https://api.mymemory.translated.net/get",
+    "engine": "openai-compatible",
     "source_lang": "en",
     "target_lang": "zh-CN",
     "enabled": true,
-    "timeout": 15,
-    "delay": 0.2,
+    "timeout": 60,
+    "temperature": 0.2,
+    "top_p": 0.95,
+    "max_tokens": 1024,
+    "delay": 0.0,
     "max_per_run": 500
   },
   "context_window": {

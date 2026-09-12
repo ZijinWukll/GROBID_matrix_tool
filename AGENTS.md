@@ -51,6 +51,7 @@ Grobid_Demo_Codes/
 
 - 运行前激活本机 conda/miniconda 环境；脚本可用环境变量 `MATRIX_PYTHON` 指定解释器，不把本机绝对路径写入仓库。
 - 运行依赖见 `requirements.txt`；测试依赖见 `requirements-dev.txt`。
+- 自动翻译通过 OpenAI 兼容接口调用本地 vLLM，连接参数只从 `.env` 读取：`MATRIX_LLM_BASE_URL`、`MATRIX_LLM_API_KEY`、`MATRIX_LLM_MODEL`；不得写进源码或提交 `.env`。
 - GROBID 地址在本地 `data/config/project.json` 中配置；代码示例默认 `http://localhost:8070`，联网调用前需确保 VPN 或内网可达。
 - `add X.pdf --from-tei 现成.tei.xml` 是离线入口，无 VPN 也能加论文或做冒烟测试。
 - `add` / `rebuild` 默认自动翻译缺译句；`--no-translate` 跳过；`init` / `import-translations` / `remove` 不触发自动翻译。
@@ -98,6 +99,7 @@ python matrix_tool.py status
 - 运行日志位于 `log/matrix_tool_YYYYMMDD.log`，为 JSON Lines；不得记录论文全文、引用上下文或整段译文。
 - `log/CHANGELOG.md` 是版本变更记录，运行日志本身不纳入版本管理。
 - 真实 `data/config/*.json`、`data/state/`、种子 PDF、导出物、回归基线和本机归档默认由 `.gitignore` 排除；提交前必须检查暂存区。
+- `.env`、密钥、证书和本机模型地址不得提交；仓库只维护 `.env.example`。
 
 ## 维护注意
 

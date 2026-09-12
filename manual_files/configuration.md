@@ -13,4 +13,12 @@
 
 上下文窗口默认前后各 2 句，可通过 `project.json` 的 `context_window` 或命令行的 `--window`、`--window-before`、`--window-after` 覆盖。
 
-自动翻译由 `project.json` 的 `translation` 段控制；关闭后将保留英文原文并计入缺译统计。
+自动翻译由 `project.json` 的 `translation` 段控制，但模型连接信息不在 JSON 中硬编码，统一从 `.env` 读取：
+
+| 环境变量 | 用途 |
+| --- | --- |
+| `MATRIX_LLM_BASE_URL` | OpenAI 兼容接口地址，通常以 `/v1` 结尾 |
+| `MATRIX_LLM_API_KEY` | 本地 vLLM 可填 `EMPTY`，真实密钥不得提交 |
+| `MATRIX_LLM_MODEL` | 服务端模型 ID，例如 `Qwen2p5` |
+
+关闭自动翻译后将保留英文原文并计入缺译统计；临时跳过使用 `--no-translate`。

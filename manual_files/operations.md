@@ -28,7 +28,7 @@ python matrix_tool.py add data/seed_papers/新论文.pdf --from-tei 现成.tei.x
 python matrix_tool.py rebuild
 ```
 
-临时跳过联网翻译时加 `--no-translate`。重建结果写入 `data/exports/科研矩阵表_AgentMemory.xlsx`，人工直接打开 xlsx 审查。
+自动翻译由 `.env` 配置的本地 vLLM 完成；临时跳过翻译时加 `--no-translate`。重建结果写入 `data/exports/科研矩阵表_AgentMemory.xlsx`，人工直接打开 xlsx 审查。
 
 ## 导出和回填译文
 

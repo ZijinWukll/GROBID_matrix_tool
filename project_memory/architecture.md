@@ -2,7 +2,7 @@
 
 科研矩阵表工具把种子论文转换成可持续重建的引用矩阵，核心流程如下：
 
-`data/seed_papers/*.pdf` → GROBID / `--from-tei` → `data/state/papers/<KEY>.tei.xml` → `data/state/papers/<KEY>.json` → 跨论文合并、去重、排序、翻译 → `data/exports/科研矩阵表_AgentMemory.xlsx`。
+`data/seed_papers/*.pdf` → GROBID / `--from-tei` → `data/state/papers/<KEY>.tei.xml` → `data/state/papers/<KEY>.json` → 跨论文合并、去重、排序 → 本地 vLLM 翻译 → `data/exports/科研矩阵表_AgentMemory.xlsx`。
 
 ## 事实源与导出物
 
@@ -17,3 +17,4 @@
 - 抽取、清洗、排序、简写选择和渲染核心保持为纯函数；CLI 层负责参数、文件 I/O、网络调用和日志。
 - 路径统一以项目根为基准解析，配置中的 PDF、TEI 和输出路径使用 `data/...` 相对路径。
 - CLI 日志只写结构化事件，不记录论文正文、引用上下文或整段译文。
+- 自动翻译通过 OpenAI 兼容客户端访问本地 vLLM；地址、密钥和模型 ID 只从 `.env` / 环境变量读取。

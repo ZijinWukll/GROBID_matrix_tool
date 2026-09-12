@@ -38,6 +38,10 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString, Tag  # bs4 顶层转引出未声明 __all__，从定义模块导入以免 Pylance 报未导出
 try:
+    from dotenv import load_dotenv
+except ImportError:  # 缺少可选依赖时仍允许非翻译命令运行
+    load_dotenv = None
+try:
     from .util_get_current_time import now_beijing_iso_no_tz
 except ImportError:  # 支持 python src/matrix_tool.py 直接运行
     from util_get_current_time import now_beijing_iso_no_tz
@@ -52,6 +56,9 @@ INPUT_SEED_DIR = DATA_DIR / "seed_papers"
 OUTPUT_DIR = DATA_DIR / "exports"
 LOG_DIR = ROOT / "log"
 
+if load_dotenv is not None:
+    load_dotenv(ROOT / ".env", override=False)
+
 SCHEMA_VERSION = 1
 PAPERS_SCHEMA_VERSION = 2   # data/state/papers/<KEY>.json 结构升级（上下文窗口 + 引用标记）
 TRANS_POOL = STATE_DIR / "translations_by_hash.json"
@@ -65,16 +72,28 @@ SENT_SEP = "\n———————————\n"
 # 可在 data/config/project.json 的 context_window 段覆盖，或用 rebuild --window 临时覆盖。
 DEFAULT_CONTEXT_WINDOW = {"before": 2, "after": 2}
 
-# 自动翻译后端（免费、无需 key）：MyMemory 公共接口，改 data/config/project.json 的 translation 段可换。
+# 自动翻译后端：OpenAI 兼容接口（学校本地 vLLM）。连接信息只从环境变量读取。
+TRANSLATION_SYSTEM_PROMPT = (
+    "你是学术论文翻译助手。请把用户给出的英文句子翻译成简体中文。"
+    "只输出译文，不要解释，不要加引号，不要保留英文原文。"
+)
 DEFAULT_TRANSLATION = {
-    "engine": "mymemory",
-    "endpoint": "https://api.mymemory.translated.net/get",
+    "engine": "openai-compatible",
     "source_lang": "en",
     "target_lang": "zh-CN",
     "enabled": True,
-    "timeout": 15,
-    "delay": 0.2,        # 串行请求间延迟（秒），避免触发免费限流
+    "timeout": 60,
+    "temperature": 0.2,
+    "top_p": 0.95,
+    "max_tokens": 1024,
+    "delay": 0.0,
     "max_per_run": 500,  # 单次重建最多自动翻译的句数上限
+}
+
+TRANSLATION_ENV_VARS = {
+    "base_url": "MATRIX_LLM_BASE_URL",
+    "api_key": "MATRIX_LLM_API_KEY",
+    "model": "MATRIX_LLM_MODEL",
 }
 
 
@@ -499,6 +518,11 @@ def iter_sentence_texts(info):
             yield s["text"]
 
 
+def is_translatable_text(text: str) -> bool:
+    """只把含英文字母的片段送入翻译；纯数字、标点或图表残片直接跳过。"""
+    return bool(re.search(r"[A-Za-z]", text or ""))
+
+
 def row_total(row) -> int:
     """行总次数 = 各篇"有上下文句子"的提及次数之和（与表格展示口径一致）。"""
     return sum(i["count"] for i in row["per_paper"].values() if has_context(i))
@@ -660,7 +684,7 @@ def render_xlsx(rows_sorted: list, project: dict) -> dict:
             info = r["per_paper"].get(pk)
             if has_context(info):
                 for s in iter_sentence_texts(info):
-                    if _hash8(s) not in trans and s not in missing_trans:
+                    if is_translatable_text(s) and _hash8(s) not in trans and s not in missing_trans:
                         missing_trans.append(s)
                 cn = SENT_SEP.join(render_block(b, trans) for b in info["blocks"])
                 line += [cn, info["count"]]
@@ -756,11 +780,21 @@ def load_alias_cfg() -> dict:
 
 
 def load_translation_cfg(project: dict) -> dict:
-    """读取自动翻译配置；缺项回落默认，未启用则返回 None。"""
+    """读取自动翻译配置；连接信息只从环境变量读取，未启用则返回 None。"""
     cfg = dict(DEFAULT_TRANSLATION)
     user = project.get("translation") or {}
     cfg.update({k: v for k, v in user.items() if v is not None})
-    return cfg if cfg.get("enabled") else None
+    if not cfg.get("enabled"):
+        return None
+
+    missing_env = []
+    for key, env_name in TRANSLATION_ENV_VARS.items():
+        value = (os.getenv(env_name) or "").strip()
+        if not value:
+            missing_env.append(env_name)
+        cfg[key] = value
+    cfg["missing_env"] = missing_env
+    return cfg
 
 
 def load_window_cfg(project: dict, override: tuple | None = None) -> tuple:
@@ -815,40 +849,41 @@ def papers_data_fresh(project: dict, quiet: bool = True, window: tuple | None = 
     return papers_data
 
 
-# ----------------------------------------------------------------- 自动翻译（免费 MyMemory）
+# ------------------------------------------------------- 自动翻译（本地 LLM）
 
-class TranslationQuotaError(Exception):
-    """MyMemory 免费额度用尽（HTTP 429）。"""
+def build_llm_client(cfg: dict):
+    """创建 OpenAI 兼容客户端；连接参数来自 .env / 环境变量。"""
+    from openai import OpenAI
+
+    return OpenAI(
+        api_key=cfg["api_key"],
+        base_url=cfg["base_url"],
+        timeout=cfg.get("timeout", 60),
+    )
 
 
-def translate_via_mymemory(text: str, cfg: dict) -> str:
-    """调用 MyMemory 公共接口把一句英文翻成中文。
-
-    普通失败返回空串；免费额度用尽时抛 TranslationQuotaError（便于批量任务提前停止）。
-    """
-    import requests
-    q = requests.utils.quote(text)
-    url = (cfg["endpoint"].rstrip("/") + f"?q={q}"
-           f"&langpair={cfg['source_lang']}|{cfg['target_lang']}")
+def translate_via_llm(text: str, cfg: dict, client=None) -> str:
+    """通过本地 OpenAI 兼容接口把一句英文翻成中文；失败返回空串。"""
     try:
-        r = requests.get(url, timeout=cfg.get("timeout", 15))
-        if r.status_code == 429:
-            raise TranslationQuotaError(str(r.json().get("responseDetails", "quota")))
-        r.raise_for_status()
-        j = r.json()
-        if str(j.get("responseStatus")) == "429" or "MYMEMORY WARNING" in str(j.get("responseDetails", "")):
-            raise TranslationQuotaError(str(j.get("responseDetails", "quota")))
-        if str(j.get("responseStatus")) != "200":
-            return ""
-        out = (j.get("responseData") or {}).get("translatedText", "")
-        return out.strip() if isinstance(out, str) else ""
-    except TranslationQuotaError:
-        raise
+        client = client or build_llm_client(cfg)
+        response = client.chat.completions.create(
+            model=cfg["model"],
+            messages=[
+                {"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
+                {"role": "user", "content": text},
+            ],
+            temperature=float(cfg.get("temperature", 0.2)),
+            top_p=float(cfg.get("top_p", 0.95)),
+            max_tokens=int(cfg.get("max_tokens", 1024)),
+        )
+        content = response.choices[0].message.content
+        return content.strip() if isinstance(content, str) else ""
     except Exception:
         return ""
 
 
-def auto_translate_missing(rows: list, project: dict, quiet: bool = False) -> dict:
+def auto_translate_missing(rows: list, project: dict, quiet: bool = False,
+                           client=None) -> dict:
     """找出当前缺译句子并批量自动翻译，写回译文池（按内容哈希键）。
 
     返回统计 {translated, skipped, failed}；翻译失败/无配置/关闭时不中断出表。
@@ -865,7 +900,7 @@ def auto_translate_missing(rows: list, project: dict, quiet: bool = False) -> di
         for info in r["per_paper"].values():
             for s in iter_sentence_texts(info):
                 h = _hash8(s)
-                if h not in pool and h not in seen:
+                if is_translatable_text(s) and h not in pool and h not in seen:
                     seen.add(h)
                     missing.append((h, s))
     if not missing:
@@ -873,24 +908,24 @@ def auto_translate_missing(rows: list, project: dict, quiet: bool = False) -> di
             print("  自动翻译: 无缺译句，跳过")
         return {"translated": 0, "skipped": 0, "failed": 0, "quota_hit": False}
 
+    if cfg.get("missing_env"):
+        if not quiet:
+            print("  自动翻译: 本地 LLM 配置不完整，已跳过；请在 .env 中设置 "
+                  + ", ".join(cfg["missing_env"]))
+        return {"translated": 0, "skipped": len(missing), "failed": 0,
+                "quota_hit": False}
+
     if not quiet:
-        print(f"  自动翻译: 发现 {len(missing)} 句缺译，开始翻译 ...")
+        print(f"  自动翻译: 发现 {len(missing)} 句缺译，使用本地模型 "
+              f"{cfg['model']} 开始翻译 ...")
     limit = cfg.get("max_per_run", 500)
     translated = failed = 0
-    quota_hit = False
-    delay = cfg.get("delay", 0.2)
+    delay = cfg.get("delay", 0.0)
+    llm_client = client or build_llm_client(cfg)
     for i, (h, s) in enumerate(missing):
         if i >= limit:
             break
-        try:
-            cn = translate_via_mymemory(s, cfg)
-        except TranslationQuotaError as e:
-            quota_hit = True
-            if not quiet:
-                print(f"  [自动翻译] 免费额度已用尽，剩余 {len(missing) - i} 句保留英文；"
-                      f"额度恢复后跑 rebuild 自动续译")
-                print(f"    （接口提示：{str(e)[:120]}）")
-            break
+        cn = translate_via_llm(s, cfg, client=llm_client)
         if cn and cn.lower() != s.lower():
             pool[h] = cn
             translated += 1
@@ -904,10 +939,9 @@ def auto_translate_missing(rows: list, project: dict, quiet: bool = False) -> di
     skipped = max(0, len(missing) - limit)
     if not quiet:
         print(f"  自动翻译: 完成 {translated} 句, 失败 {failed} 句"
-              + (f", 超出单次上限跳过 {skipped} 句" if skipped else "")
-              + ("（额度用尽提前停止）" if quota_hit else ""))
+              + (f", 超出单次上限跳过 {skipped} 句" if skipped else ""))
     return {"translated": translated, "skipped": skipped, "failed": failed,
-            "quota_hit": quota_hit}
+            "quota_hit": False}
 
 
 def rebuild_all(project: dict, quiet: bool = False, no_translate: bool = False,
@@ -1318,7 +1352,7 @@ def export_untranslated(project: dict, quiet: bool = False):
     for r in rows:
         for info in r["per_paper"].values():
             for s in iter_sentence_texts(info):
-                if _hash8(s) not in trans and s not in missing:
+                if is_translatable_text(s) and _hash8(s) not in trans and s not in missing:
                     missing.append(s)
     if not missing:
         if not quiet:
@@ -1406,9 +1440,10 @@ def cmd_status(args):
     rules = load_rules()
     n_missing = sum(1 for r in rows for info in r["per_paper"].values()
                     for s in iter_sentence_texts(info)
-                    if _hash8(s) not in trans)  # 按出现次计，未去重
+                    if is_translatable_text(s) and _hash8(s) not in trans)  # 按出现次计，未去重
     uniq_missing = {s for r in rows for info in r["per_paper"].values()
-                    for s in iter_sentence_texts(info) if _hash8(s) not in trans}
+                    for s in iter_sentence_texts(info)
+                    if is_translatable_text(s) and _hash8(s) not in trans}
     no_abbrev = [r["display_title"] for r in rows if not abbrev_three_level(r["display_title"], rules)[0]]
     n_ctx = sum(1 for r in rows if r["per_paper"])
     print(f"\n当前表格: {len(rows)} 行（有上下文 {n_ctx} 行）| "

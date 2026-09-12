@@ -62,6 +62,24 @@ Copy-Item data/config/display_title_fixes.example.json data/config/display_title
 
 然后把本机文件按 `data/...` 相对路径放入对应目录。不要在配置、日志或文档中写入个人绝对路径。
 
+## 本地 LLM 翻译
+
+自动翻译通过 OpenAI 兼容接口调用学校本地 vLLM，不再调用 MyMemory。连接信息只从 `.env` 读取：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+在本机 `.env` 中设置：
+
+```dotenv
+MATRIX_LLM_BASE_URL=http://your-llm-host:8900/v1
+MATRIX_LLM_API_KEY=EMPTY
+MATRIX_LLM_MODEL=your-model-id
+```
+
+`.env` 已被 `.gitignore` 排除；仓库只提交脱敏的 `.env.example`。
+
 ## 常用命令
 
 | 命令 | 作用 |

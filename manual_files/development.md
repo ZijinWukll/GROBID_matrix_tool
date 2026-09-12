@@ -14,6 +14,8 @@
 python -m pip install -r requirements-dev.txt
 ```
 
+本地翻译配置放在 `.env`，不要提交。测试使用假的 OpenAI 兼容客户端验证请求参数和译文写回，不依赖学校服务器。
+
 ## 测试
 
 ```powershell

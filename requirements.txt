@@ -4,3 +4,5 @@ requests        # GROBID API 调用
 beautifulsoup4  # TEI XML 解析（需 lxml 后端）
 lxml
 openpyxl        # xlsx 生成
+openai          # 本地 vLLM OpenAI 兼容接口
+python-dotenv   # 从 .env 读取本地 LLM 配置

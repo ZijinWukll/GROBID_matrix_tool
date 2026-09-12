@@ -4,9 +4,9 @@
 
 先连接校园 VPN，再确认 `data/config/project.json` 中的 `grobid_url` 可访问。完全离线时改用 `add ... --from-tei`。
 
-## 自动翻译失败或限流
+## 自动翻译失败
 
-缺译句会保留英文原文，不影响重建和出表。恢复网络后再次运行 `rebuild`；临时跳过使用 `--no-translate`。
+先检查 `.env` 是否包含 `MATRIX_LLM_BASE_URL`、`MATRIX_LLM_API_KEY` 和 `MATRIX_LLM_MODEL`，再确认学校服务器可达。缺译句会保留英文原文，不影响重建和出表；服务恢复后再次运行 `rebuild`。
 
 ## 找不到 PDF 或 TEI
 
