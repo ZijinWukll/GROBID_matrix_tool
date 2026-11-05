@@ -21,8 +21,8 @@ MATRIX_LLM_MODEL=your-model-id
 
 | 字段 | 用途 |
 | --- | --- |
-| `paper_order` | 表格列顺序 |
-| `papers` | 论文 key、PDF、TEI、表头和加入日期 |
+| `paper_order` | 当前参与矩阵的论文及列顺序；build 默认同步为当前 PDF 集合 |
+| `papers` | 论文 key、PDF、TEI、表头和加入日期，包含不再参与当前矩阵的历史缓存登记 |
 | `papers.<KEY>.pdf_sha256` | PDF 内容哈希，用于 build 判断是否需要重新解析；无需手工填写 |
 | `output_path` | 最终 xlsx 输出路径 |
 | `translation` | 翻译开关、超时、批次和单次上限 |
@@ -34,9 +34,12 @@ MATRIX_LLM_MODEL=your-model-id
 | 字段 | 默认值 | 含义 |
 | --- | --- | --- |
 | `enabled` | `true` | 是否自动分类 |
+| `timeout` | `30` | 单次模型请求的读取超时秒数；连接超时固定为 5 秒，不自动重试 |
 | `batch_size` | `8` | 每次 LLM 请求的单元格数 |
 | `review_threshold` | `0.60` | 低于该值进入人工复核 |
 | `max_excerpt_chars` | `2400` | 单个引用段送入模型的最大字符数 |
+
+翻译的 `timeout` 默认 60 秒，`max_per_run` 默认 500 句。分类每批、翻译每 10 句及结束/中断时保存成功结果，模型请求失败后停止本轮连续调用；网络兜底标签在后续运行时可重试。需要先出表时用 `--no-llm`，无需改动持久配置。
 
 ## 修正入口
 

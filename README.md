@@ -51,9 +51,23 @@ python matrix_tool.py build
 python matrix_tool.py build --input-dir input
 ```
 
-每次批量处理后只统一导出一次。PDF 内容未变且 TEI 缓存存在时跳过解析；旧记录没有 PDF 哈希时会重新解析一次。中文文件名可直接使用。移走 PDF 不会自动注销已登记论文。
+每次批量处理后只统一导出一次。PDF 内容未变且 TEI 缓存存在时跳过解析；旧记录没有 PDF 哈希时会重新解析一次。中文文件名可直接使用。
 
-解析失败会显示具体文件，保存成功论文，并在有已登记论文时导出可用结果，同时以失败状态结束；修复问题后重跑同一命令即可续跑。空目录且没有已登记论文时只提示放入 PDF，不生成空表。
+**当前文件夹决定本轮矩阵包含哪些论文。** 换一批 PDF 后重新运行 `build`，旧论文会从矩阵中排除，TEI、译文和人工结果保留作缓存，无需手动删除。使用 `--input-dir` 时，以指定目录为准，标准目录的归档副本不额外加入。清空已使用的输入目录再构建，会生成不含论文的空表，避免留下误导的旧结果。
+
+想继续累加、保留不在当前文件夹中的论文，使用 `python matrix_tool.py build --keep-existing`，或沿用单篇 `add`。
+
+解析失败会显示具体文件，保存成功论文并生成本轮可用结果，同时以失败状态结束；失败的新版本不会冒用旧 TEI。全部 PDF 都解析失败时保留上一张表和原范围，不覆盖成功产物。修复后重跑同一命令即可续跑。新项目空目录只提示放入 PDF，不生成空表。
+
+抽取后会显示关系分类批次、翻译句数和 Excel 写入进度。模型请求失败时停止本轮连续请求，保留成功结果，以待复核标签和英文原文继续出表；服务恢复后运行 `build` 或 `rebuild` 补全。
+
+暂时只想拿到表格、跳过模型分类和翻译：
+
+```powershell
+python matrix_tool.py build --no-llm
+```
+
+该选项仍会在需要时用 GROBID 解析 PDF；已有 TEI 时，可用 `python matrix_tool.py rebuild --no-llm` 完全离线重建当前矩阵。
 
 完成后打开 `data/exports/科研矩阵表_AgentMemory.xlsx`。查看状态：
 
@@ -81,7 +95,7 @@ python matrix_tool.py add data/seed_papers/新论文.pdf --from-tei 现成.tei.x
 python matrix_tool.py rebuild
 ```
 
-`rebuild` 只处理已登记论文的 TEI，不扫描新 PDF、不调用 GROBID。重建流程：抽取 → 关系标签 → 翻译 → 写出 xlsx。只处理新增或缓存失效的标签和译文。
+`rebuild` 只处理当前参与矩阵的论文 TEI，不扫描新 PDF、不改变论文范围、不调用 GROBID。重建流程：抽取 → 关系标签 → 翻译 → 写出 xlsx。只处理新增或缓存失效的标签和译文。
 
 只想提前创建空项目时可运行 `python matrix_tool.py init`，无需旧论文或网络。已有项目补齐缺失配置使用 `init --force`，保留已有配置、人工规则和论文；早期三篇种子的数据迁移仍可通过 `init --migrate-legacy` 使用，详见[日常操作](manual_files/operations.md)。
 
@@ -124,6 +138,8 @@ python matrix_tool.py export-labels --all
 | ----------------------------------------------------- | ------------------------------------------ |
 | `python matrix_tool.py build`                         | 扫描默认 PDF 文件夹并一键生成；首次自动初始化 |
 | `python matrix_tool.py build --input-dir input`        | 从指定文件夹批量导入并生成 |
+| `python matrix_tool.py build --keep-existing`          | 累加构建，保留输入目录之外的论文 |
+| `python matrix_tool.py build --no-llm`                 | 跳过模型分类与翻译，直接生成表格 |
 | `python matrix_tool.py status`                        | 查看论文、行数、缺译、缺简写和标签复核状态 |
 | `python matrix_tool.py add data/seed_papers/文件.pdf` | 添加种子论文并重建                         |
 | `python matrix_tool.py rebuild`                       | 重新分类、翻译并生成 xlsx                  |

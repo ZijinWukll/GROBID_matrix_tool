@@ -41,7 +41,7 @@ def test_help_build_explains_folder_cache_and_single_export(capsys) -> None:
 
     mt.main(["help", "build"])
     output = capsys.readouterr().out
-    for expected in ("data/seed_papers", "--input-dir", "--no-translate", "--relabel", "缓存"):
+    for expected in ("data/seed_papers", "--input-dir", "--no-translate", "--relabel", "缓存", "--no-llm", "--keep-existing"):
         assert expected in output
 
 

@@ -16,6 +16,7 @@
   },
   "relationship_labeling": {
     "enabled": true,
+    "timeout": 30,
     "batch_size": 8,
     "review_threshold": 0.6,
     "temperature": 0.0,

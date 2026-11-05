@@ -142,14 +142,86 @@ def test_empty_folder_gives_actionable_message_without_export(workspace, capsys)
     assert not calls
 
 
-def test_build_retains_registered_papers_when_pdf_is_removed(workspace):
+def test_build_syncs_current_folder_and_keeps_inactive_cache_for_restore(workspace):
     mt, calls = workspace
     pdf = put_pdf(mt, "A.pdf")
     mt.main(["build", "--no-translate"])
     pdf.unlink()
     mt.main(["build", "--no-translate"])
+    assert mt.load_project()["paper_order"] == []
+    assert (mt.PAPERS_STATE_DIR / "A.tei.xml").is_file()
+    assert load_workbook(mt.ROOT / mt.load_project()["output_path"]).active.max_row == 1
+    put_pdf(mt, "A.pdf")
+    mt.main(["build", "--no-translate"])
     assert mt.load_project()["paper_order"] == ["A"]
     assert calls == ["A.pdf"]
+
+
+def test_replacing_all_pdfs_only_exports_current_papers(workspace):
+    mt, calls = workspace
+    pdf = put_pdf(mt, "OLD.pdf")
+    mt.main(["build", "--no-translate"])
+    pdf.unlink()
+    put_pdf(mt, "NEW.pdf")
+    mt.main(["build", "--no-translate"])
+    assert mt.load_project()["paper_order"] == ["NEW"]
+    assert (mt.PAPERS_STATE_DIR / "OLD.tei.xml").is_file()
+    wb = load_workbook(mt.ROOT / mt.load_project()["output_path"])
+    assert wb.active.max_column == 5
+    wb.close()
+
+
+def test_custom_folder_is_authoritative_even_with_archived_pdfs(workspace):
+    mt, calls = workspace
+    put_pdf(mt, "OLD.pdf")
+    mt.main(["build", "--no-translate"])
+    inbox = mt.ROOT / "input"
+    inbox.mkdir()
+    (inbox / "NEW.pdf").write_bytes(b"new")
+    mt.main(["build", "--input-dir", "input", "--no-translate"])
+    assert mt.load_project()["paper_order"] == ["NEW"]
+
+
+def test_keep_existing_build_preserves_accumulating_workflow(workspace):
+    mt, calls = workspace
+    pdf = put_pdf(mt, "OLD.pdf")
+    mt.main(["build", "--no-translate"])
+    pdf.unlink()
+    put_pdf(mt, "NEW.pdf")
+    mt.main(["build", "--keep-existing", "--no-translate"])
+    assert mt.load_project()["paper_order"] == ["OLD", "NEW"]
+
+
+def test_failed_changed_pdf_does_not_silently_export_its_old_version(workspace, monkeypatch):
+    mt, calls = workspace
+    changed = put_pdf(mt, "A.pdf")
+    put_pdf(mt, "B.pdf")
+    mt.main(["build", "--no-translate"])
+    changed.write_bytes(b"changed")
+    monkeypatch.setattr(mt, "grobid_fulltext", lambda *args: "invalid")
+    with pytest.raises(SystemExit):
+        mt.main(["build", "--no-translate"])
+    assert mt.load_project()["paper_order"] == ["B"]
+
+
+def test_no_llm_build_reuses_manual_results_without_model_calls(workspace, monkeypatch):
+    mt, calls = workspace
+    put_pdf(mt, "A.pdf")
+    monkeypatch.setattr(mt, "build_llm_client", lambda cfg: pytest.fail("不应请求模型"))
+    mt.main(["build", "--no-llm"])
+    mt.main(["rebuild", "--no-llm"])
+    assert (mt.ROOT / mt.load_project()["output_path"]).is_file()
+
+
+def test_empty_folder_sync_excludes_tei_only_papers_but_rebuild_retains_them(workspace):
+    mt, calls = workspace
+    tei = mt.ROOT / "existing.xml"
+    tei.write_text(TEI)
+    mt.main(["add", "--from-tei", str(tei), "--key", "OFFLINE", "--no-translate"])
+    mt.main(["rebuild", "--no-translate"])
+    assert mt.load_project()["paper_order"] == ["OFFLINE"]
+    mt.main(["build", "--no-translate"])
+    assert mt.load_project()["paper_order"] == []
 
 
 def test_parse_failure_keeps_successes_and_can_resume(workspace, monkeypatch, capsys):

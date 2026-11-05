@@ -204,6 +204,68 @@ def test_invalid_llm_result_falls_back_to_mi_and_review(monkeypatch) -> None:
     assert stats["needs_review"] == 1
 
 
+def test_service_failure_stops_requests_and_fallback_is_retryable(monkeypatch, capsys):
+    from src import matrix_tool as mt
+
+    cache = {}
+    calls = []
+    monkeypatch.setattr(mt, "load_relationship_label_cfg", lambda project: _cfg())
+    monkeypatch.setattr(mt, "load_relation_label_cache", lambda: dict(cache))
+    monkeypatch.setattr(mt, "load_relation_label_overrides", lambda: {})
+    monkeypatch.setattr(mt, "write_relation_label_cache", lambda data: cache.update(data))
+
+    def failed_batch(items, cfg, client):
+        calls.append(len(items))
+        raise TimeoutError("测试网络超时")
+
+    rows = [{**_rows()[0], "id": f"row{i}"} for i in range(20)]
+    monkeypatch.setattr(mt, "_classify_relation_batch", failed_batch)
+    stats = mt.auto_label_missing(rows, _project(), client=object())
+    assert calls == [8]
+    assert stats["service_unavailable"] is True
+    assert stats["failed"] == 20
+    assert "关系分类 [1/3]" in capsys.readouterr().out
+    # 临时网络失败的兜底不能变成永久自动标签，下一次仍应尝试。
+    mt.auto_label_missing(rows, _project(), client=object(), quiet=True)
+    assert calls == [8, 8]
+    labels = mt.effective_relation_labels(rows, _project())
+    assert labels["row0|P1"]["source"] == "fallback"
+
+
+def test_cached_labels_do_not_even_construct_model_client(monkeypatch):
+    from src import matrix_tool as mt
+
+    cfg = _cfg()
+    monkeypatch.setattr(mt, "load_relationship_label_cfg", lambda project: cfg)
+    monkeypatch.setattr(mt, "load_relation_label_cache", lambda: {})
+    monkeypatch.setattr(mt, "load_relation_label_overrides", lambda: {"row1|P1": "B&E"})
+    monkeypatch.setattr(mt, "write_relation_label_cache", lambda data: None)
+    monkeypatch.setattr(mt, "build_llm_client", lambda cfg: pytest.fail("不应构造模型客户端"))
+    mt.auto_label_missing(_rows(), _project())
+
+
+def test_relation_cache_is_saved_before_next_request(monkeypatch):
+    from src import matrix_tool as mt
+
+    cfg = {**_cfg(), "batch_size": 1}
+    saved = {}
+    monkeypatch.setattr(mt, "load_relationship_label_cfg", lambda project: cfg)
+    monkeypatch.setattr(mt, "load_relation_label_cache", lambda: {})
+    monkeypatch.setattr(mt, "load_relation_label_overrides", lambda: {})
+    monkeypatch.setattr(mt, "write_relation_label_cache", lambda data: saved.update(data))
+    rows = [_rows()[0], {**_rows()[0], "id": "row2"}]
+
+    def classify(items, cfg, client):
+        if items[0]["id"] == "row2|P1":
+            assert saved["row1|P1"]["label"] == "B&E"
+            raise KeyboardInterrupt()
+        return {"row1|P1": {"label": "B&E", "confidence": 0.9, "evidence": "extends"}}
+
+    monkeypatch.setattr(mt, "_classify_relation_batch", classify)
+    with pytest.raises(KeyboardInterrupt):
+        mt.auto_label_missing(rows, _project(), client=object())
+
+
 def test_render_xlsx_adds_bold_label_prefix_and_normal_body(tmp_path, monkeypatch) -> None:
     from src import matrix_tool as mt
 
@@ -226,6 +288,23 @@ def test_render_xlsx_adds_bold_label_prefix_and_normal_body(tmp_path, monkeypatc
     assert str(value).startswith("【基于与拓展｜B&E】 ▶ Our method extends")
     assert value[0].font.b is True
     assert value[1].font.b is not True
+
+
+@pytest.mark.parametrize("source", ["missing", "fallback"])
+def test_missing_or_failed_labels_are_not_presented_as_model_conclusions(tmp_path, monkeypatch, source):
+    from src import matrix_tool as mt
+
+    monkeypatch.setattr(mt, "load_pool", lambda: {})
+    monkeypatch.setattr(mt, "load_rules", lambda: [])
+    path = tmp_path / "matrix.xlsx"
+    project = {**_project(), "output_path": str(path)}
+    labels = {"row1|P1": {"label": "M/I", "source": source, "needs_review": True}}
+    mt.render_xlsx(_rows(), project, labels)
+    wb = load_workbook(path)
+    value = str(wb.active["B2"].value)
+    wb.close()
+    assert "待分类" in value
+    assert "简单提及或无关" not in value
 
 
 def test_export_labels_xlsx_has_dropdown_and_import_roundtrip(tmp_path) -> None:
@@ -320,6 +399,20 @@ def test_rebuild_all_classifies_before_translation(monkeypatch) -> None:
     mt.rebuild_all(_project(), quiet=True)
 
     assert calls == ["label", "translate", "render"]
+
+
+def test_rebuild_skips_translation_after_model_service_failure(monkeypatch) -> None:
+    from src import matrix_tool as mt
+
+    monkeypatch.setattr(mt, "papers_data_fresh", lambda *args, **kwargs: {})
+    monkeypatch.setattr(mt, "compute_rows", lambda *args: [])
+    monkeypatch.setattr(mt, "load_fixes", lambda: [])
+    monkeypatch.setattr(mt, "auto_label_missing", lambda *args, **kwargs: {"labels": {}, "service_unavailable": True})
+    monkeypatch.setattr(mt, "auto_translate_missing", lambda *args, **kwargs: pytest.fail("不应再次请求故障服务"))
+    monkeypatch.setattr(mt, "render_xlsx", lambda *args: {"rows": 0})
+    rows, stats = mt.rebuild_all(_project(), quiet=True)
+    assert rows == []
+    assert stats["rows"] == 0
 
 
 def test_cli_help_lists_relation_label_commands(capsys) -> None:

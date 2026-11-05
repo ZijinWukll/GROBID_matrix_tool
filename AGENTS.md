@@ -82,7 +82,9 @@ python matrix_tool.py build
 python matrix_tool.py build --input-dir input
 ```
 
-`build` / `add` 首次自动创建缺失配置并保留已有文件。`build` 只扫描指定文件夹本层的 PDF，根据内容哈希和 TEI 缓存增量解析，整批统一重建一次；支持 `--no-translate`、`--relabel` 和上下文窗口参数。普通 `init` 只创建空项目，旧数据迁移使用 `init --migrate-legacy`。
+`build` / `add` 首次自动创建缺失配置并保留已有文件。`build` 只扫描指定文件夹本层的 PDF，根据内容哈希和 TEI 缓存增量解析，整批统一重建一次；默认将 `paper_order` 同步为当前目录的可用论文，历史元数据和缓存保留但不参与矩阵。`--keep-existing` 使用累加模式。普通 `init` 只创建空项目，旧数据迁移使用 `init --migrate-legacy`。
+
+`build`、`add`、`rebuild` 支持 `--no-llm` 跳过模型分类和翻译，复用缓存及人工结果；`--no-translate` 只跳过翻译。模型阶段显示批次/句数进度，网络请求异常后停止本轮连续调用并继续出表，失败兜底标签后续可重试。人工结果不得覆盖，切换目录不得删除历史缓存。
 
 ### 加论文
 

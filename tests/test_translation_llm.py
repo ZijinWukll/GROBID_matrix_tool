@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from conftest import PROJECT_ROOT
 
 
@@ -117,3 +119,42 @@ def test_non_linguistic_fragment_is_not_treated_as_translation_missing() -> None
 
     assert mt.is_translatable_text("5:") is False
     assert mt.is_translatable_text("Hello, world.") is True
+
+
+def test_translation_stops_on_service_failure_and_keeps_completed_results(monkeypatch, capsys):
+    from src import matrix_tool as mt
+
+    texts = ["First sentence.", "Second sentence.", "Third sentence."]
+    rows = [{"per_paper": {"P": {"blocks": [{"sentences": [{"text": t} for t in texts]}]}}}]
+    cfg = {"model": "TestModel", "missing_env": [], "max_per_run": 500}
+    saved, calls = {}, []
+
+    def create(**kwargs):
+        calls.append(True)
+        if len(calls) > 1:
+            raise TimeoutError("测试超时")
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="人工智能译文"))])
+
+    fake = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    monkeypatch.setattr(mt, "load_translation_cfg", lambda project: cfg)
+    monkeypatch.setattr(mt, "load_pool", lambda: {})
+    monkeypatch.setattr(mt, "write_pool", lambda pool: saved.update(pool))
+    stats = mt.auto_translate_missing(rows, {}, client=fake)
+    assert len(calls) == 2
+    assert saved == {mt._hash8(texts[0]): "人工智能译文"}
+    assert stats["translated"] == 1
+    assert stats["skipped"] == 1
+    assert stats["service_unavailable"] is True
+    assert "翻译 [1/3]" in capsys.readouterr().out
+
+
+def test_model_client_has_no_hidden_retries_and_short_connect_timeout(monkeypatch):
+    import openai
+    from src import matrix_tool as mt
+
+    captured = {}
+    monkeypatch.setattr(openai, "OpenAI", lambda **kwargs: captured.update(kwargs))
+    mt.build_llm_client({"api_key": "test", "base_url": "http://llm.test", "timeout": 40})
+    assert captured["max_retries"] == 0
+    assert captured["timeout"].connect <= 5
+    assert captured["timeout"].read == 40
