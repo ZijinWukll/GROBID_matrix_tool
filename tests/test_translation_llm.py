@@ -121,6 +121,14 @@ def test_non_linguistic_fragment_is_not_treated_as_translation_missing() -> None
     assert mt.is_translatable_text("Hello, world.") is True
 
 
+def test_numeric_table_row_with_method_name_is_not_missing_translation() -> None:
+    from src import matrix_tool as mt
+
+    assert mt.is_translatable_text("Method-X 12.34 56.78 90.[[0]]") is False
+    assert mt.is_translatable_text("Model 2 improves accuracy by 26.5 percent.") is True
+    assert mt.is_translatable_text("We compare Method-X with two baselines [[0]].") is True
+
+
 def test_translation_stops_on_service_failure_and_keeps_completed_results(monkeypatch, capsys):
     from src import matrix_tool as mt
 

@@ -543,7 +543,10 @@ def iter_sentence_texts(info):
 
 
 def is_translatable_text(text: str) -> bool:
-    """只把含英文字母的片段送入翻译；纯数字、标点或图表残片直接跳过。"""
+    """排除纯数字、标点，以及“方法名 + 多列数值”的表格片段。"""
+    plain = re.sub(r"\[\[\d+\]\]", "", text or "").strip()
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_+\-]*(?:\s+[-+]?\d+(?:\.\d*)?%?){2,}", plain):
+        return False
     return bool(re.search(r"[A-Za-z]", text or ""))
 
 

@@ -61,7 +61,14 @@ def test_logical_rows_match_the_frozen_baseline() -> None:
     if any(key not in project["papers"] or not (mt.ROOT / project["papers"][key]["tei"]).is_file()
            for key in frozen_order):
         pytest.skip("冻结基线所需的历史 TEI 缓存不完整")
-    assert _logical_snapshot(mt, {**project, "paper_order": frozen_order}) == baseline
+    actual = _logical_snapshot(mt, {**project, "paper_order": frozen_order})
+    # 模型运行参数允许随服务调整；它们不参与固定语料的抽取、排序。
+    # 仍严格比较冻结论文、上下文、简写及每条旧译文，新增译文不算回归。
+    for key in ("translation", "relationship_labeling"):
+        actual["project"].pop(key, None)
+        baseline["project"].pop(key, None)
+    actual["translations"] = {key: actual["translations"].get(key) for key in baseline["translations"]}
+    assert actual == baseline
 
 
 def test_project_config_points_only_at_existing_refactored_paths() -> None:
