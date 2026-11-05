@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.tmp
 .pytest_cache/
+.pytest_tmp*/
 
 # 本地凭据与证书
 .env
@@ -14,6 +15,8 @@ __pycache__/
 *.pfx
 
 # 本地真实研究数据：不提交 PDF、解析缓存、状态、译文池和导出物
+*.[pP][dD][fF]
+*.tei.xml
 /data/config/*
 !/data/config/README.md
 !/data/config/*.example.json

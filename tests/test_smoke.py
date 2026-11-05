@@ -47,6 +47,20 @@ def test_help_uses_the_new_data_paths() -> None:
     assert "data/seed_papers" in result.stdout
 
 
+def test_clean_checkout_can_init_and_report_status_without_private_data(tmp_path: Path) -> None:
+    shutil.copyfile(PROJECT_ROOT / "matrix_tool.py", tmp_path / "matrix_tool.py")
+    shutil.copytree(PROJECT_ROOT / "src", tmp_path / "src", ignore=shutil.ignore_patterns("__pycache__"))
+    for command in ("init", "status", "build"):
+        result = subprocess.run(
+            [sys.executable, str(tmp_path / "matrix_tool.py"), command],
+            cwd=tmp_path, capture_output=True, text=True, encoding="utf-8",
+        )
+        assert result.returncode == 0, result.stderr
+    project = json.loads((tmp_path / "data/config/project.json").read_text(encoding="utf-8"))
+    assert project["paper_order"] == []
+    assert not list((tmp_path / "data/exports").glob("*.xlsx"))
+
+
 @requires_private_data
 def test_status_reports_the_new_export_path() -> None:
     result = _run_cli("status")

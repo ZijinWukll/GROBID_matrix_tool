@@ -4,7 +4,9 @@
 每加一篇种子论文，自动解析、抽取、跨论文去重合并、按"总内部引用次数"降序重建整张表。
 
 用法（用 miniconda 的 python，不要用裸 python）:
-  python matrix_tool.py init                                                 # 首次：迁移现有种子论文并自检对账
+  python matrix_tool.py build                                                # 扫描 data/seed_papers，增量解析后统一生成
+  python matrix_tool.py init                                                 # 可选：创建空项目，不需要旧数据或网络
+  python matrix_tool.py init --migrate-legacy                                # 迁移现有旧种子论文并自检对账
   ... matrix_tool.py add data/seed_papers/新论文.pdf [--key KEY] [--force]    # 加新种子（需校园 VPN 连 GROBID）
   ... matrix_tool.py add X.pdf --from-tei 现成.tei.xml                        # 离线入口：直接用现成 TEI，无需 VPN
   ... matrix_tool.py rebuild                                                 # 改过 data/config 或译文后全量重建
@@ -954,7 +956,8 @@ def print_render_summary(stats: dict):
 def load_project() -> dict:
     p = CONFIG_DIR / "project.json"
     if not p.exists():
-        sys.exit("未找到 data/config/project.json —— 请先运行: python matrix_tool.py init")
+        sys.exit("未找到 data/config/project.json —— 放好 PDF 后运行: python matrix_tool.py build；"
+                 "或先运行 python matrix_tool.py init 创建空项目")
     proj = load_json(p)
     if proj.get("schema_version") != SCHEMA_VERSION:
         sys.exit(f"project.json schema_version 不兼容（{proj.get('schema_version')} != {SCHEMA_VERSION}）")
@@ -1593,20 +1596,62 @@ DEFAULT_TITLE_FIXES = [
 ]
 
 
+def ensure_project() -> dict:
+    """补齐首次运行所需目录与配置；已有配置、人工规则和缓存始终保留。"""
+    for folder in (CONFIG_DIR, PAPERS_STATE_DIR, INPUT_SEED_DIR, OUTPUT_DIR):
+        folder.mkdir(parents=True, exist_ok=True)
+    defaults = {
+        "abbrev_rules.json": {"schema_version": SCHEMA_VERSION, "rules": DEFAULT_ABBREV_RULES},
+        "alias_mentions.json": {"schema_version": SCHEMA_VERSION, "papers": {}},
+        "display_title_fixes.json": {"schema_version": SCHEMA_VERSION, "fixes": DEFAULT_TITLE_FIXES},
+        "project.json": {
+            "schema_version": SCHEMA_VERSION,
+            "output_path": "data/exports/科研矩阵表_AgentMemory.xlsx",
+            "paper_order": [], "papers": {},
+            "translation": dict(DEFAULT_TRANSLATION),
+            "relationship_labeling": dict(DEFAULT_RELATIONSHIP_LABELING),
+            "context_window": dict(DEFAULT_CONTEXT_WINDOW),
+        },
+    }
+    for name, content in defaults.items():
+        path = CONFIG_DIR / name
+        if not path.exists():
+            write_json(path, content)
+    return load_project()
+
+
 def cmd_init(args):
+    if args.migrate_legacy:
+        cmd_migrate_legacy(args)
+        return
+    if (CONFIG_DIR / "project.json").exists() and not args.force:
+        sys.exit("项目已初始化；放好 PDF 后运行 python matrix_tool.py build。"
+                 "如需补齐缺失配置，请运行 init --force（保留已有配置与论文）。")
+    project = ensure_project()
+    print(f"初始化完成：空项目可直接使用，当前已登记 {len(project['paper_order'])} 篇论文。")
+    print("将 PDF 放入 data/seed_papers，然后运行：python matrix_tool.py build")
+
+
+def cmd_migrate_legacy(args):
+    """保留早期三篇种子的迁移与对账入口，默认 init 不再依赖私有数据。"""
     project_path = CONFIG_DIR / "project.json"
     if project_path.exists() and not args.force:
         sys.exit("data/config/project.json 已存在（如需重置请加 --force）")
 
-    CONFIG_DIR.mkdir(exist_ok=True)
+    # 先检查所有输入，避免迁移中途才发现缺文件、覆盖现有配置。
+    for key, seed in LEGACY_SEEDS.items():
+        if not (PAPERS_STATE_DIR / f"{key}.tei.xml").exists() and not (ROOT / seed["legacy_tei"]).exists():
+            sys.exit(f"缺少旧论文 TEI: {key} —— 普通新项目请使用 init 或 build，无需迁移旧数据")
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     PAPERS_STATE_DIR.mkdir(parents=True, exist_ok=True)
 
-    write_json(CONFIG_DIR / "abbrev_rules.json",
-               {"schema_version": SCHEMA_VERSION, "rules": DEFAULT_ABBREV_RULES})
-    write_json(CONFIG_DIR / "alias_mentions.json",
-               {"schema_version": SCHEMA_VERSION, "papers": DEFAULT_ALIAS_MENTIONS})
-    write_json(CONFIG_DIR / "display_title_fixes.json",
-               {"schema_version": SCHEMA_VERSION, "fixes": DEFAULT_TITLE_FIXES})
+    for name, content in {
+        "abbrev_rules.json": {"schema_version": SCHEMA_VERSION, "rules": DEFAULT_ABBREV_RULES},
+        "alias_mentions.json": {"schema_version": SCHEMA_VERSION, "papers": DEFAULT_ALIAS_MENTIONS},
+        "display_title_fixes.json": {"schema_version": SCHEMA_VERSION, "fixes": DEFAULT_TITLE_FIXES},
+    }.items():
+        if not (CONFIG_DIR / name).exists():
+            write_json(CONFIG_DIR / name, content)
 
     papers = {}
     for key, s in LEGACY_SEEDS.items():
@@ -1710,7 +1755,116 @@ def _resolve_key(project: dict, pdf: Path | None, key_arg: str | None) -> str:
     if key_arg:
         return re.sub(r"[^A-Za-z0-9_\-]+", "_", key_arg.strip())
     stem = pdf.stem if pdf else "PAPER"
-    return re.sub(r"[^A-Za-z0-9_\-]+", "_", stem) or "PAPER"
+    key = re.sub(r"[^A-Za-z0-9_\-]+", "_", stem)
+    # 保留原有英文短名；中文、空格和特殊字符用稳定后缀避免归一化后重名。
+    return key if key == stem else f"{key.strip('_') or 'PAPER'}_{_hash8(stem)}"
+
+
+def _pdf_hash(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def _check_grobid(project: dict) -> str:
+    base = load_grobid_url(project)
+    if not base:
+        sys.exit(f"未配置 GROBID 地址 —— 请在 .env 中设置 {GROBID_ENV_VAR}")
+    try:
+        alive = grobid_alive(base)
+    except Exception as exc:
+        alive = False
+        print(f"[警告] GROBID 连接失败: {exc}")
+    if not alive:
+        sys.exit("GROBID 不可达 —— 请检查 .env 和校园网络/VPN 后重试；"
+                 "已有 TEI 可用 add --from-tei 离线导入")
+    return base
+
+
+def _register_paper(project: dict, key: str, pdf: Path | None, tei_text: str):
+    """供单篇与批量入口复用：验证解析结果，保存单篇状态并登记，不重建整表。"""
+    soup = BeautifulSoup(tei_text, "xml")
+    if soup.find("TEI") is None or soup.find("text") is None:
+        raise ValueError("解析结果不是有效的论文 TEI XML，请检查 GROBID 返回内容")
+    previous = project["papers"].get(key, {})
+    data = extract_paper(key, tei_text, load_alias_cfg().get(key, {}),
+                         window=load_window_cfg(project))
+    info = dict(previous)
+    info.update({
+        "pdf": "",
+        "tei": (PAPERS_STATE_DIR / f"{key}.tei.xml").relative_to(ROOT).as_posix(),
+        "header": previous.get("header") or parse_title_from_tei(tei_text).lower() or key.lower(),
+        "added": previous.get("added") or _beijing_date(),
+    })
+    if pdf is not None:
+        INPUT_SEED_DIR.mkdir(parents=True, exist_ok=True)
+        destination = (INPUT_SEED_DIR / pdf.name).resolve()
+        info["pdf_sha256"] = _pdf_hash(pdf)
+        if pdf.resolve() != destination:
+            shutil.copyfile(pdf, destination)
+        info["pdf"] = destination.relative_to(ROOT).as_posix()
+    else:
+        info.pop("pdf_sha256", None)
+    _atomic_write_text(ROOT / info["tei"], tei_text)
+    write_json(PAPERS_STATE_DIR / f"{key}.json",
+               {"schema_version": PAPERS_SCHEMA_VERSION, "key": key, **data})
+    project["papers"][key] = info
+    if key not in project["paper_order"]:
+        project["paper_order"].append(key)
+    write_json(CONFIG_DIR / "project.json", project)
+    return data
+
+
+def cmd_build(args):
+    project = ensure_project()
+    source = Path(args.input_dir).expanduser() if args.input_dir else INPUT_SEED_DIR
+    if not source.is_absolute():
+        source = ROOT / source
+    source = source.resolve()
+    if not source.is_dir():
+        sys.exit(f"PDF 文件夹不存在: {source} —— 请先创建文件夹并放入 PDF")
+    pdfs = sorted((p for p in source.iterdir() if p.is_file() and p.suffix.lower() == ".pdf"),
+                  key=lambda p: p.name.casefold())
+    print(f"扫描 PDF 文件夹: {source}（本层 {len(pdfs)} 篇）")
+    # 优先按归档路径匹配，保留原 add --key 的自定义短名。
+    registered = {}
+    for key in project["paper_order"]:
+        pdf_rel = project["papers"][key].get("pdf")
+        if pdf_rel:
+            registered[(ROOT / pdf_rel).resolve()] = key
+    pending, seen = [], set()
+    cached = 0
+    for pdf in pdfs:
+        destination = (INPUT_SEED_DIR / pdf.name).resolve()
+        key = registered.get(pdf.resolve()) or registered.get(destination) or _resolve_key(project, pdf, None)
+        if key in seen:
+            sys.exit(f"PDF 论文标识冲突: {pdf.name}（{key}）—— 请更改文件名后重试")
+        seen.add(key)
+        info = project["papers"].get(key)
+        if info and (not info.get("pdf") or (ROOT / info["pdf"]).resolve() != destination):
+            sys.exit(f"PDF 与已登记论文标识冲突: {pdf.name}（{key}）—— 请更改文件名或使用 add --key")
+        if (info and info.get("pdf_sha256") == _pdf_hash(pdf)
+                and (ROOT / info["tei"]).is_file()):
+            cached += 1
+        else:
+            pending.append((key, pdf))
+    if not pdfs and not project["paper_order"]:
+        print("未找到 PDF。请将论文 PDF 放入 data/seed_papers（或 --input-dir 指定的文件夹），再运行 build。")
+        return
+    base = _check_grobid(project) if pending else None
+    failed = []
+    for index, (key, pdf) in enumerate(pending, start=1):
+        print(f"[{index}/{len(pending)}] 解析 {pdf.name} ...", flush=True)
+        try:
+            tei_text = grobid_fulltext(base, pdf)
+            _register_paper(project, key, pdf, tei_text)
+        except Exception as exc:
+            failed.append(pdf.name)
+            print(f"[失败] {pdf.name}: {exc}")
+    print(f"PDF 处理：成功 {len(pending) - len(failed)} 篇，复用缓存 {cached} 篇，失败 {len(failed)} 篇。")
+    if project["paper_order"]:
+        rebuild_all(project, no_translate=args.no_translate, window=_cli_window(args), relabel=args.relabel)
+    if failed:
+        sys.exit(f"未全部完成：{len(failed)} 篇 PDF 失败。成功论文已保存；排除问题后重新运行 build 即可续跑。")
 
 
 def _cli_window(args):
@@ -1731,7 +1885,9 @@ def _cli_window(args):
 
 
 def cmd_add(args):
-    project = load_project()
+    project = ensure_project()
+    if not args.pdf and not args.from_tei:
+        sys.exit("请提供 PDF 路径，或使用 --from-tei 指定已有 TEI 文件")
 
     pdf_abs = None
     if args.pdf:
@@ -1743,10 +1899,24 @@ def cmd_add(args):
         pdf_abs = pdf_abs.resolve()
 
     key = _resolve_key(project, pdf_abs, args.key)
+    if pdf_abs is not None:
+        destination = (INPUT_SEED_DIR / pdf_abs.name).resolve()
+        for existing_key, info in project["papers"].items():
+            pdf_rel = info.get("pdf")
+            if pdf_rel and (ROOT / pdf_rel).resolve() in (pdf_abs, destination):
+                if not args.key:
+                    key = existing_key
+                elif key != existing_key:
+                    sys.exit(f"PDF 归档路径与已登记论文冲突: {pdf_abs.name}（{existing_key}）—— "
+                             "请更改文件名，或使用原论文短名配合 --force 更新")
     if key in project["papers"] and not args.force:
         sys.exit(f"种子论文 {key} 已存在（重新解析请加 --force；删除用 remove {key}）")
 
-    before = rows_for_diff(project)
+    before_project = project
+    if key in project["papers"] and not (ROOT / project["papers"][key]["tei"]).is_file():
+        print(f"{key} 的 TEI 缓存缺失，本次重新解析修复。")
+        before_project = {**project, "paper_order": [k for k in project["paper_order"] if k != key]}
+    before = rows_for_diff(before_project)
 
     # 取 TEI：离线入口或 GROBID 解析
     if args.from_tei:
@@ -1758,51 +1928,13 @@ def cmd_add(args):
         tei_text = tei_src.read_text(encoding="utf-8")
         print(f"使用现成 TEI: {tei_src}")
     else:
-        base = load_grobid_url(project)
-        if not base:
-            sys.exit(f"未配置 GROBID 地址 —— 请在 .env 中设置 {GROBID_ENV_VAR}")
-        try:
-            alive = grobid_alive(base)
-        except Exception as e:
-            alive = False
-            print(f"[warn] GROBID 连接失败: {e}")
-        if not alive:
-            sys.exit(f"GROBID 不可达（{base}）—— 请先连接校园 VPN 后重试，"
-                     f"或改用 --from-tei 离线入口")
+        base = _check_grobid(project)
         print(f"GROBID 解析中（约需 1-2 分钟）: {pdf_abs.name} ...")
         tei_text = grobid_fulltext(base, pdf_abs)
 
-    # PDF 归位到 data/seed_papers（--from-tei 可不带 PDF）
-    if pdf_abs is not None:
-        INPUT_SEED_DIR.mkdir(parents=True, exist_ok=True)
-        if pdf_abs.parent != INPUT_SEED_DIR:
-            shutil.copyfile(pdf_abs, INPUT_SEED_DIR / pdf_abs.name)
-            pdf_abs = INPUT_SEED_DIR / pdf_abs
-        pdf_rel = pdf_abs.relative_to(ROOT).as_posix()
-    else:
-        pdf_rel = ""
-
-    tei_rel = (PAPERS_STATE_DIR / f"{key}.tei.xml").relative_to(ROOT).as_posix()
-    _atomic_write_text(ROOT / tei_rel, tei_text)
-
-    title = parse_title_from_tei(tei_text)
-    header = title.lower() if title else key.lower()
-    project["papers"][key] = {
-        "pdf": pdf_rel,
-        "tei": tei_rel,
-        "header": header,
-        "added": _beijing_date(),
-    }
-    if key not in project["paper_order"]:
-        project["paper_order"].append(key)
-    write_json(CONFIG_DIR / "project.json", project)
-
-    alias_cfg = load_alias_cfg()
+    data = _register_paper(project, key, pdf_abs, tei_text)
     win = load_window_cfg(project, _cli_window(args))
-    data = extract_paper(key, tei_text, alias_cfg.get(key, {}), window=win)
-    write_json(PAPERS_STATE_DIR / f"{key}.json",
-               {"schema_version": PAPERS_SCHEMA_VERSION, "key": key,
-                "refs_meta": data["refs_meta"], "contexts": data["contexts"]})
+    header = project["papers"][key]["header"]
 
     print(f"已注册种子论文 {key}: 参考文献 {len(data['refs_meta'])} 条, "
           f"有上下文 {len(data['contexts'])} 条, 表头 = {header[:60]!r}")
@@ -1984,14 +2116,30 @@ def cmd_status(args):
 # ------------------------------------------------------------- 项目专属 help（中文）
 # 与 main() 里的子命令注册同源；加新命令时同步在此登记，离线可用、不读 README/AGENTS。
 COMMANDS_HELP = {
-    "init": {
-        "usage": "matrix_tool.py init [--force]",
-        "desc": "首次迁移或整体重置：生成本地配置与状态目录，逐篇抽取并重建 xlsx。",
+    "build": {
+        "usage": "matrix_tool.py build [--input-dir 文件夹] [--no-translate] [--window N] [--relabel]",
+        "desc": "一键生成：扫描 PDF → 自动初始化 → 增量解析 → 关系标签 → 翻译 → 统一导出一次 xlsx。",
         "args": [
-            "--force    覆盖已有配置重新初始化（会优先复用 data/state 里已有的 TEI 和译文池）",
+            "--input-dir    PDF 文件夹（默认 data/seed_papers，只扫描本层，包含 .PDF）",
+            "--no-translate 跳过自动翻译；关系标签仍按配置执行",
+            "--relabel      强制重算非人工关系标签，不强制重新解析 PDF",
+            "--window N     引用句前后各 N 句；也支持 --window-before / --window-after",
+        ],
+        "example": "python matrix_tool.py build",
+        "notes": "首次自动创建配置；原文未变且 TEI 存在时复用缓存，无需 GROBID。"
+                 "旧记录没有 PDF 哈希时会重新解析一次。移走 PDF 不注销论文，注销请用 remove。"
+                 "解析失败时保留成功结果并返回失败状态，可再次 build 续跑。",
+    },
+    "init": {
+        "usage": "matrix_tool.py init [--force] [--migrate-legacy]",
+        "desc": "创建空项目，无需旧论文、TEI 或网络；通常无需单独运行，build/add 会自动初始化。",
+        "args": [
+            "--force    补齐缺失配置，保留已有论文、配置、人工规则和缓存",
+            "--migrate-legacy  显式迁移旧三篇种子论文并重建对账，需相应旧 TEI",
         ],
         "example": "matrix_tool.py init",
-        "notes": "仅首次或想整体重置时使用；日常加论文用 add，改完配置用 rebuild。",
+        "notes": "默认只创建配置，不解析 PDF、不生成空表。--migrate-legacy --force 会替换论文登记表，"
+                 "仅用于恢复旧迁移；规则、人工覆盖和译文池保留。",
     },
     "add": {
         "usage": "matrix_tool.py add 新论文.pdf [--key KEY] [--force] [--from-tei 现成.tei.xml] [--no-translate] [--window N] [--relabel]",
@@ -2019,7 +2167,8 @@ COMMANDS_HELP = {
             "--relabel      强制重新分类全部非人工关系标签",
         ],
         "example": "matrix_tool.py rebuild",
-        "notes": "改过 data/config、译文或标签后跑它；关系标签先于自动翻译；xlsx 只是导出物，永远不要手改。",
+        "notes": "只使用已登记论文的 TEI，不扫描新 PDF、不调用 GROBID；新增 PDF 请用 build 或 add。"
+                 "关系标签先于自动翻译；xlsx 只是导出物，永远不要手改。",
     },
     "export-untranslated": {
         "usage": "matrix_tool.py export-untranslated",
@@ -2062,7 +2211,8 @@ COMMANDS_HELP = {
             "KEY  要注销的种子论文短名（见 status 列表）",
         ],
         "example": "matrix_tool.py remove TEST",
-        "notes": "仅删除该篇的 TEI/JSON 状态文件，不动译文池与其他论文。",
+        "notes": "仅删除该篇的 TEI/JSON 状态文件，不动译文池与其他论文。"
+                 "PDF 仍保留，如不想下次 build 重新导入，请将该 PDF 移出扫描文件夹。",
     },
     "status": {
         "usage": "matrix_tool.py status",
@@ -2075,16 +2225,16 @@ COMMANDS_HELP = {
 
 
 COMMAND_GROUPS = [
-    ("日常流程", ["status", "add", "rebuild"]),
+    ("日常流程", ["build", "status", "add", "rebuild"]),
     ("标签与翻译", ["export-labels", "import-labels", "export-untranslated", "import-translations"]),
     ("维护", ["init", "remove"]),
 ]
 
 HELP_QUICKSTART = [
     "conda activate matrix",
+    "将论文 PDF 放入 data/seed_papers/（首次请先配置 .env）",
+    "python matrix_tool.py build",
     "python matrix_tool.py status",
-    "python matrix_tool.py add data/seed_papers/新论文.pdf",
-    "python matrix_tool.py rebuild",
     "python matrix_tool.py export-labels",
     "python matrix_tool.py import-labels data/exports/relation_labels_时间戳.xlsx",
 ]
@@ -2131,9 +2281,19 @@ def main(argv=None):
         prog="matrix_tool.py", description="科研矩阵表生长工具")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("init", help="首次迁移或重置项目配置与状态")
-    p.add_argument("--force", action="store_true", help="覆盖已有配置重新初始化")
+    p = sub.add_parser("init", help="创建空项目，无需旧数据或网络")
+    p.add_argument("--force", action="store_true", help="补齐缺失配置，保留已有项目；迁移模式会替换论文登记表")
+    p.add_argument("--migrate-legacy", action="store_true", help="显式迁移旧三篇种子论文并对账")
     p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser("build", help="扫描文件夹中的 PDF，增量解析并一键生成整张表")
+    p.add_argument("--input-dir", help="PDF 文件夹，默认 data/seed_papers，只扫描本层")
+    p.add_argument("--no-translate", action="store_true", help="跳过自动翻译，关系标签仍按配置执行")
+    p.add_argument("--relabel", action="store_true", help="强制重新分类全部非人工关系标签")
+    p.add_argument("--window", type=int, help="引用句前后各 N 句")
+    p.add_argument("--window-before", type=int, help="引用句前 N 句")
+    p.add_argument("--window-after", type=int, help="引用句后 N 句")
+    p.set_defaults(func=cmd_build)
 
     p = sub.add_parser("add", help="添加一篇种子论文并重建表格")
     p.add_argument("pdf", nargs="?", help="种子论文 PDF（--from-tei 时可省略）")

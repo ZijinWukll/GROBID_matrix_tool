@@ -17,10 +17,13 @@ MATRIX_LLM_MODEL=your-model-id
 
 `data/config/project.json` 主要字段：
 
+`build` / `add` 首次运行会自动创建可用的空配置，普通新项目无需手动复制带占位论文的示例文件。PDF 默认放入 `data/seed_papers/`；临时指定其他目录使用 `build --input-dir 文件夹`（不会更改后续默认扫描目录）。
+
 | 字段 | 用途 |
 | --- | --- |
 | `paper_order` | 表格列顺序 |
 | `papers` | 论文 key、PDF、TEI、表头和加入日期 |
+| `papers.<KEY>.pdf_sha256` | PDF 内容哈希，用于 build 判断是否需要重新解析；无需手工填写 |
 | `output_path` | 最终 xlsx 输出路径 |
 | `translation` | 翻译开关、超时、批次和单次上限 |
 | `relationship_labeling` | 关系标签批次、复核阈值和引用段长度 |

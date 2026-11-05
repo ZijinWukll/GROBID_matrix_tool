@@ -35,3 +35,9 @@
 ## D-009：学校服务器地址统一放入 `.env`
 
 GROBID 使用 `MATRIX_GROBID_URL`，本地 vLLM 使用 `MATRIX_LLM_BASE_URL`、`MATRIX_LLM_API_KEY` 和 `MATRIX_LLM_MODEL`。脚本、示例配置和文档不保存学校真实 IP；旧 project 字段仅保留兼容回落。
+
+## D-010：目录批量构建与单篇入口并存
+
+推荐流程为把 PDF 放入 `data/seed_papers/`，运行 `build`；也可用 `--input-dir` 临时指定目录。保留原有 `add`、`--from-tei`、`rebuild` 和人工复核命令，避免改变已有重建的含义。`build` / `add` 自动补齐缺失配置，普通 `init` 创建空项目；旧三篇论文迁移改为显式 `init --migrate-legacy`。
+
+PDF 内容哈希与 TEI 是否存在共同决定是否重新解析；没有哈希的旧记录重新解析一次。按归档路径匹配以保留旧短名、列顺序和人工表头，中文文件名生成带哈希的稳定短名。逐篇保存成功状态，最终统一重建一次；解析失败时继续处理其余论文，并以非零状态结束以支持重试。目录扫描仅限本层，不根据 PDF 缺失自动删除论文登记。

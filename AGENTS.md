@@ -55,8 +55,9 @@ Grobid_Demo_Codes/
 ```powershell
 conda activate matrix
 python -m pip install -r requirements.txt
-Copy-Item .env.example .env
-python matrix_tool.py status
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+# 编辑 .env 后，将 PDF 放入 data/seed_papers/，再运行：
+python matrix_tool.py build
 ```
 
 `.env` 使用以下变量，源码中不得硬编码真实值：
@@ -71,6 +72,17 @@ MATRIX_LLM_MODEL=your-model-id
 GROBID 地址只从 `MATRIX_GROBID_URL` 读取；旧配置中的 `grobid_url` 仅作为兼容回落，不再是标准入口。
 
 ## 标准工作流
+
+### 推荐：PDF 文件夹一键生成
+
+将论文 PDF 放入 `data/seed_papers/`，运行：
+
+```powershell
+python matrix_tool.py build
+python matrix_tool.py build --input-dir input
+```
+
+`build` / `add` 首次自动创建缺失配置并保留已有文件。`build` 只扫描指定文件夹本层的 PDF，根据内容哈希和 TEI 缓存增量解析，整批统一重建一次；支持 `--no-translate`、`--relabel` 和上下文窗口参数。普通 `init` 只创建空项目，旧数据迁移使用 `init --migrate-legacy`。
 
 ### 加论文
 
@@ -88,6 +100,8 @@ python matrix_tool.py rebuild --relabel
 ```
 
 重建顺序固定为：抽取 → 合并排序 → 关系标签 → 自动翻译 → 写 xlsx。`--relabel` 只强制重算非人工标签，人工覆盖保留。
+
+`rebuild` 只读取已登记 TEI，不扫描新 PDF。`remove` 保留 PDF，若不希望后续 `build` 重新导入，先将该 PDF 移出扫描目录。
 
 ### 标签复核
 
@@ -110,6 +124,7 @@ python matrix_tool.py import-translations data/exports/untranslated_时间戳.js
 | 命令 | 作用 |
 | --- | --- |
 | `status` | 查看论文、行数、缺译、缺简写、标签复核状态 |
+| `build [--input-dir 文件夹]` | 扫描 PDF，首次自动初始化，增量解析后统一生成 |
 | `add` | 加论文并自动完成标签、翻译、重建 |
 | `rebuild` | 全量增量重建；支持 `--relabel`、`--no-translate` |
 | `export-labels [--all]` | 导出标签复核表 |
@@ -117,7 +132,8 @@ python matrix_tool.py import-translations data/exports/untranslated_时间戳.js
 | `export-untranslated` | 导出缺译句子 |
 | `import-translations 文件.json` | 回填人工译文并重建 |
 | `remove KEY` | 注销种子论文并重建 |
-| `init [--force]` | 首次迁移或重置 |
+| `init [--force]` | 创建空项目；已有项目补齐缺失配置，保留已有文件 |
+| `init --migrate-legacy [--force]` | 显式旧数据迁移；force 会替换论文登记表 |
 | `help [命令名]` | 查看快速上手、命令分组或单命令详情 |
 
 修改帮助系统时，同步维护 `COMMANDS_HELP`、`COMMAND_GROUPS`、`HELP_QUICKSTART` 和 `tests/test_help.py`。

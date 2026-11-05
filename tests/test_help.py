@@ -12,6 +12,7 @@ def test_help_overview_has_quickstart_and_command_groups(capsys) -> None:
     assert "标签与翻译" in output
     assert "维护" in output
     assert "matrix_tool.py help 命令名" in output
+    assert "python matrix_tool.py build" in output
 
 
 def test_help_rebuild_describes_label_order_and_relabel(capsys) -> None:
@@ -33,3 +34,21 @@ def test_help_export_labels_explains_review_only_default(capsys) -> None:
     output = capsys.readouterr().out
     assert "默认仅待复核项" in output
     assert "--all" in output
+
+
+def test_help_build_explains_folder_cache_and_single_export(capsys) -> None:
+    from src import matrix_tool as mt
+
+    mt.main(["help", "build"])
+    output = capsys.readouterr().out
+    for expected in ("data/seed_papers", "--input-dir", "--no-translate", "--relabel", "缓存"):
+        assert expected in output
+
+
+def test_help_init_explains_empty_project_and_legacy_migration(capsys) -> None:
+    from src import matrix_tool as mt
+
+    mt.main(["help", "init"])
+    output = capsys.readouterr().out
+    assert "空项目" in output
+    assert "--migrate-legacy" in output
