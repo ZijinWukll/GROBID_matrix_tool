@@ -99,7 +99,7 @@ def test_build_reuses_cache_and_only_parses_changed_or_missing_tei(workspace, mo
     assert calls == ["A.pdf"] * 3
 
 
-def test_build_accepts_custom_folder_and_preserves_custom_key_and_header(workspace):
+def test_import_then_build_preserves_custom_key_and_header(workspace):
     mt, calls = workspace
     inbox = mt.ROOT / "input"
     inbox.mkdir()
@@ -112,10 +112,11 @@ def test_build_accepts_custom_folder_and_preserves_custom_key_and_header(workspa
     project = mt.load_project()
     project["papers"]["CUSTOM"]["header"] = "人工表头"
     mt.write_json(mt.CONFIG_DIR / "project.json", project)
-    mt.main(["build", "--input-dir", "input", "--no-translate"])
+    mt.main(["build", "--no-translate"])
     assert not calls
     source.write_bytes(b"new content")
-    mt.main(["build", "--input-dir", "input", "--no-translate"])
+    mt.main(["import", str(source), "--replace"])
+    mt.main(["build", "--no-translate"])
     assert calls == ["A.pdf"]
     assert mt.load_project()["paper_order"] == ["CUSTOM"]
     assert mt.load_project()["papers"]["CUSTOM"]["header"] == "人工表头"
@@ -171,25 +172,30 @@ def test_replacing_all_pdfs_only_exports_current_papers(workspace):
     wb.close()
 
 
-def test_custom_folder_is_authoritative_even_with_archived_pdfs(workspace):
+def test_external_folder_requires_import_before_build(workspace):
     mt, calls = workspace
     put_pdf(mt, "OLD.pdf")
     mt.main(["build", "--no-translate"])
     inbox = mt.ROOT / "input"
     inbox.mkdir()
     (inbox / "NEW.pdf").write_bytes(b"new")
-    mt.main(["build", "--input-dir", "input", "--no-translate"])
-    assert mt.load_project()["paper_order"] == ["NEW"]
+    mt.main(["build", "--no-translate"])
+    assert mt.load_project()["paper_order"] == ["OLD"]
+    mt.main(["import", str(inbox)])
+    mt.main(["build", "--no-translate"])
+    assert mt.load_project()["paper_order"] == ["OLD", "NEW"]
 
 
-def test_keep_existing_build_preserves_accumulating_workflow(workspace):
+def test_keep_existing_flag_is_rejected(workspace):
     mt, calls = workspace
     pdf = put_pdf(mt, "OLD.pdf")
     mt.main(["build", "--no-translate"])
     pdf.unlink()
     put_pdf(mt, "NEW.pdf")
-    mt.main(["build", "--keep-existing", "--no-translate"])
-    assert mt.load_project()["paper_order"] == ["OLD", "NEW"]
+    with pytest.raises(SystemExit):
+        mt.main(["build", "--keep-existing", "--no-translate"])
+    mt.main(["build", "--no-translate"])
+    assert mt.load_project()["paper_order"] == ["NEW"]
 
 
 def test_failed_changed_pdf_does_not_silently_export_its_old_version(workspace, monkeypatch):
@@ -217,7 +223,10 @@ def test_empty_folder_sync_excludes_tei_only_papers_but_rebuild_retains_them(wor
     mt, calls = workspace
     tei = mt.ROOT / "existing.xml"
     tei.write_text(TEI)
-    mt.main(["add", "--from-tei", str(tei), "--key", "OFFLINE", "--no-translate"])
+    pdf = put_pdf(mt, "offline.pdf")
+    mt.main(["import", str(pdf), "--from-tei", str(tei), "--key", "OFFLINE"])
+    mt.main(["build", "--no-llm"])
+    pdf.unlink()
     mt.main(["rebuild", "--no-translate"])
     assert mt.load_project()["paper_order"] == ["OFFLINE"]
     mt.main(["build", "--no-translate"])
@@ -334,7 +343,9 @@ def test_tei_only_add_and_rebuild_work_without_grobid(workspace, monkeypatch):
     monkeypatch.setattr(mt, "grobid_alive", lambda base: pytest.fail("不应联网"))
     tei = mt.ROOT / "existing.xml"
     tei.write_text(TEI)
-    mt.main(["add", "--from-tei", str(tei), "--key", "OFFLINE", "--no-translate"])
+    pdf = put_pdf(mt, "offline.pdf")
+    mt.main(["import", str(pdf), "--from-tei", str(tei), "--key", "OFFLINE"])
+    mt.main(["build", "--no-llm"])
     mt.main(["rebuild", "--no-translate"])
     assert mt.load_project()["paper_order"] == ["OFFLINE"]
     assert not calls
@@ -343,7 +354,7 @@ def test_tei_only_add_and_rebuild_work_without_grobid(workspace, monkeypatch):
 def test_missing_custom_folder_is_reported_without_scanning_default(workspace):
     mt, calls = workspace
     put_pdf(mt, "A.pdf")
-    with pytest.raises(SystemExit, match="文件夹不存在"):
+    with pytest.raises(SystemExit):
         mt.main(["build", "--input-dir", "typo"])
     assert not calls
 
@@ -376,8 +387,8 @@ def test_add_preserves_legacy_key_when_adding_same_filename(workspace):
     tei = mt.ROOT / "existing.xml"
     tei.write_text(TEI)
     mt.main(["add", str(pdf), "--key", "Paper_One", "--from-tei", str(tei), "--no-translate"])
-    with pytest.raises(SystemExit, match="已存在"):
-        mt.main(["add", str(pdf), "--from-tei", str(tei), "--no-translate"])
+    mt.main(["add", str(pdf), "--from-tei", str(tei), "--no-translate"])
+    mt.main(["build", "--no-llm"])
     assert mt.load_project()["paper_order"] == ["Paper_One"]
 
 
@@ -391,7 +402,7 @@ def test_add_does_not_overwrite_another_registered_pdf(workspace):
     other_dir.mkdir()
     other = other_dir / "A.pdf"
     other.write_bytes(b"different paper")
-    with pytest.raises(SystemExit, match="冲突"):
+    with pytest.raises(SystemExit, match="同名"):
         mt.main(["add", str(other), "--key", "OTHER", "--from-tei", str(tei), "--no-translate"])
     assert pdf.read_bytes() == b"test pdf"
-    assert mt.load_project()["paper_order"] == ["A"]
+    assert mt.load_project()["paper_order"] == []

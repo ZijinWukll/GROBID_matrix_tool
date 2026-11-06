@@ -1,73 +1,35 @@
 # 故障排查
 
-## 命令太多记不住
+## 换了 PDF，旧论文还在
 
-```powershell
-python matrix_tool.py help
-python matrix_tool.py help rebuild
-python matrix_tool.py help import-labels
-```
+build 始终只扫描 data/seed_papers 本层 PDF，不读取目录外论文来扩大范围。移走旧 PDF 再 build 即排除它，不必删 TEI。status 区分当前输入与最近快照；export/rebuild 只导出最近快照，不同步新 PDF。
+
+## 想从下载目录直接使用
+
+先 `python matrix_tool.py import "下载目录"`，再 build。build 不接受 --input-dir 或 --keep-existing。也可直接手动复制到 seed_papers。
 
 ## GROBID 不可达
 
-连接校园 VPN，确认 `.env` 中的 `MATRIX_GROBID_URL` 可达。离线时用 `add ... --from-tei`。
+检查 .env、校园网络或 VPN。已有有效 TEI 不需要 GROBID；也可 import PDF --from-tei XML 后 build。旧缓存无哈希不会因此强制联网；已知 PDF 内容变化时仍须重新解析，避免冒用旧版本。
 
-`build` 只有新增 PDF、PDF 内容变化、TEI 丢失或旧记录没有 PDF 哈希时才需要重新解析。全部命中缓存时可直接重建；关系标签和翻译仍可能需要模型服务。
+## 抽取后等待较久
 
-## 未找到 project.json / init 提示缺少旧 TEI
+后续在做关系分类和逐句翻译，终端显示批次/句数。有效响应但输出缺失时程序会自动拆小批次、扩大预算后有限补试；低置信标签自动检查一次。网络请求异常会停止本轮连续调用，保存已有结果并继续出表。
 
-新版本 `build` 和 `add` 会自动创建空项目配置。把 PDF 放入 `data/seed_papers/`，运行 `python matrix_tool.py build` 即可；也可以先用 `init` 创建空项目。
+检查 .env 的模型地址、认证和模型名，服务恢复后重新 build。HTTP 502 可能来自代理或服务网关，GROBID 可用不代表模型可用。临时出表用 build --no-llm；完全离线且无需同步 PDF 用 export。
 
-旧版本的 `init` 固定迁移三篇历史论文，缺少私有 TEI 时会失败。更新代码后运行普通 `init` 或 `build` 即可，不必寻找截图中的旧缓存，也不要用 `--migrate-legacy` 初始化普通新项目。
+## 仍有不确定标签或英文
 
-## 放了 PDF，rebuild 却没有加入
+自动补救有次数和服务条件边界，不通过降低置信阈值或编造结果来清零。保留标记不阻断表格生成，也不要求用户先复核。服务恢复/参数调整后 build 可补未完成项；如主动精修，才使用 export-labels、export-untranslated 等可选工具。
 
-`rebuild` 只处理已登记论文，不扫描文件夹。使用 `python matrix_tool.py build`；PDF 放在其他文件夹时用 `build --input-dir 文件夹`。扫描范围为指定目录本层，不包含子文件夹。
+## 清理缓存后 export 报缺少快照
 
-## 批量构建有论文失败
+cache clean --all --apply 会删除当前 TEI/JSON。PDF、短名及人工数据仍在，运行 build 即可恢复。默认 clean 只是预览历史解析文件，没加 --apply 不会删除。
 
-查看 `[失败] 文件名: 原因` 提示。成功论文已保存并导出可用结果，命令返回失败状态；默认同步模式下失败的新版本不会使用旧缓存冒充本轮结果。全部 PDF 都失败时保留上一张表与原范围。修复 PDF 或服务问题后重跑相同 `build`，不会重复解析已成功且未变的论文。
+## Excel 无法写入
 
-## 换了 PDF，旧论文还在表格里
+关闭正在 Excel 中打开的目标文件后重试。若构建已经完成、JSON 和模型结果已保存，运行 export 即可重新出表，不需要重新调用模型。
 
-更新后 `build` 以当前扫描文件夹为准：不在文件夹中的论文会退出当前矩阵，缓存留存不会自动把论文重新加入。无需删除 `data/state/papers/`。`status` 会区分当前论文和历史缓存。
+## 首次配置错误
 
-`build --keep-existing` 是累加模式；`rebuild` 保持当前矩阵范围，只更新处理结果。确认没有把这两种方式误当成目录同步。
-
-## 抽取完成后一直等待，没有 Excel
-
-后续是模型关系分类和逐句翻译，GROBID 能解析 PDF 不代表模型服务可用。新版本显示分类批次、翻译句数、单次读取超时与写入阶段；连接超时为 5 秒，不做 SDK 隐式重试。关系分类的 `timeout` 默认 30 秒，翻译默认 60 秒，可在 `project.json` 中分别设置。
-
-请求失败后停止本轮连续模型调用，保留结果并继续出表。HTTP 502 可能来自代理或服务端网关，需结合实际网络检查定位；不要把它当作模型返回空标签。
-
-暂时跳过模型，先拿到表格：
-
-```powershell
-python matrix_tool.py build --no-llm
-```
-
-已有 TEI、并且希望保持当前论文范围时，用 `python matrix_tool.py rebuild --no-llm` 可离线重建。仅 `--no-translate` 仍会执行关系分类。
-
-## 注销论文后 build 又重新加入
-
-`remove` 保留原 PDF。将该 PDF 从扫描目录移出后再注销；使用自定义输入目录时，也检查 `data/seed_papers/` 中的归档副本。
-
-## 本地模型或翻译失败
-
-检查 `.env` 中的 `MATRIX_LLM_BASE_URL`、`MATRIX_LLM_API_KEY`、`MATRIX_LLM_MODEL`。缺译句会回退英文，不影响出表；服务恢复后重新 `rebuild`。
-
-## 关系标签大量待复核
-
-运行 `python matrix_tool.py export-labels`，只处理导出的待复核项。也可以运行 `rebuild --relabel` 重试自动分类。
-
-## xlsx 写入失败
-
-关闭 Excel 中打开的 `data/exports/科研矩阵表_AgentMemory.xlsx` 后重试。最终 xlsx 是导出物，不需要手工编辑。
-
-## 找不到 PDF 或 TEI
-
-配置中的路径必须是项目根相对路径，并以 `data/` 开头。检查 `project.json` 中的 `pdf` 和 `tei` 字段。
-
-## 编辑器包导出告警
-
-`NavigableString is not exported from bs4` 等提示不等于运行错误；以终端命令和 pytest 结果为准。
+build/import 自动创建缺失配置；可选 init 创建空项目。普通新项目无需旧 HMARS 等 TEI，也不要用 --migrate-legacy。服务连接只写 .env，不在源码中硬编码。

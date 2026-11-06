@@ -1,25 +1,17 @@
 # 架构与数据流
 
-科研矩阵表工具把种子论文转换成可持续重建的引用矩阵，核心流程如下：
+主流程：`seed_papers 中的 PDF → 有效 TEI 复用 / GROBID → 单篇 JSON → 合并排序 → 自动标签与补救 → 全量补译 → xlsx`。
 
-`build` 扫描 `data/seed_papers/*.pdf`（或 `--input-dir`）→ 增量 GROBID 解析 → `data/state/papers/<KEY>.tei.xml` → `data/state/papers/<KEY>.json` → 跨论文合并、去重、排序 → 关系标签 → 本地 vLLM 翻译 → `data/exports/科研矩阵表_AgentMemory.xlsx`。单篇 `add` / `--from-tei` 入口保留。
+build 是唯一自动构建入口，严格以 seed_papers 本层 PDF 决定范围，无目录外累加分支。papers 保存历史短名和来源信息；paper_order 是最近构建范围。切换范围不删文件。
 
-## 事实源与导出物
+单篇 JSON 是离线导出的事实源；TEI 是重新抽取的原始缓存，PDF 哈希用于检测已知内容变化。旧缓存缺少哈希时先复用。import 只负责归档 PDF 与可选 TEI，不改变构建范围；export 仅读 JSON 和有效标签/译文缓存，不调用服务、不重新抽取。
 
-- `data/state/papers/<KEY>.json` 是单篇抽取结果的持久状态。实际 `rebuild` 先从已登记 TEI 重新抽取并更新这些 JSON，再重算整表；不会扫描或解析 PDF。
-- `data/state/papers/<KEY>.tei.xml` 是离线重建所依赖的原始解析缓存。
-- `data/exports/` 中的 xlsx 和未翻译清单都是导出物，可以重新生成，不直接手改。
-- 译文池位于 `data/state/translations_by_hash.json`，键为英文句子 md5 的前 8 位；原文不变则译文不会丢。
+分类请求使用短编号并映射回稳定缓存键；JSON 围栏可恢复。缺失结果缩小批次并扩大预算，网络异常快速停止，不拆为无限单条重试。低置信候选自动检查一次，分歧保留可选复核状态；检查不视为独立真值。
 
-## 代码边界
+翻译不因旧 500 句上限截断，按检查点处理全部缺译；空回复、截断、标记丢失自动有限补试。既有译文与人工标签优先，服务故障保留成功结果并出表。
 
-- 根目录 `matrix_tool.py` 只是兼容入口，实际实现位于 `src/matrix_tool.py`。
-- 抽取、清洗、排序、简写选择和渲染核心保持为纯函数；CLI 层负责参数、文件 I/O、网络调用和日志。
-- 路径统一以项目根为基准解析，配置中的 PDF、TEI 和输出路径使用 `data/...` 相对路径。
-- CLI 日志只写结构化事件，不记录论文正文、引用上下文或整段译文。
-- `ensure_project` 为 `build`、`add` 和普通 `init` 创建缺失配置，保留已有配置与人工数据。普通 `init` 不再依赖旧论文；旧迁移由 `init --migrate-legacy` 显式调用。
-- `build` 根据全部登记（含历史缓存）的 PDF 路径匹配已有短名，再用 `pdf_sha256` 与 TEI 是否存在判断是否解析。`paper_order` 记录当前参与矩阵的论文，默认同步为当前目录成功解析或命中缓存的论文；`papers` 保留历史元数据供复用。`--keep-existing` 保留累加方式，`rebuild` 不改变当前范围。逐篇保存成功状态，整批只重建一次；解析失败返回失败状态，全部 PDF 失败时保留上一张表。
-- 模型客户端连接超时 5 秒，读取超时由各阶段配置控制，禁用 SDK 隐式重试。分类逐批保存、翻译按 10 句及结束/中断保存；网络异常停止本轮连续请求。失败兜底保留 `source=fallback`，下一轮可重试，避免失败标签被永久当成命中缓存。`--no-llm` 仅复用缓存及人工结果，不请求分类/翻译。
-- 自动翻译通过 OpenAI 兼容客户端访问本地 vLLM；地址、密钥和模型 ID 只从 `.env` / 环境变量读取。
-- GROBID 地址只从 `.env` 的 `MATRIX_GROBID_URL` 读取；学校真实地址不写入源码、示例配置或文档。
-- 关系标签在翻译前按单元格批量分类，缓存于 `data/state/relation_labels.json`；人工覆盖保存在 `data/config/relation_label_overrides.json`，优先级高于模型结果。
+cache 清理仅由用户显式 --apply 执行，目标路径必须位于 papers 状态目录，先验证全部目标后删除。PDF、短名登记、译文池和人工覆盖不删除。
+
+add/import、rebuild/export 保留兼容映射，remove 不再承担删除状态并构建的混合职责。可选人工导出只读快照，回填后仅离线刷新。
+
+根目录 matrix_tool.py 为薄入口，src/matrix_tool.py 为实现。配置连接信息只来自 .env/环境变量；运行日志不记录论文正文、引用段或译文；私有状态不提交。

@@ -17,7 +17,7 @@
 ## 必须遵守
 
 1. `data/state/papers/<KEY>.json` 是矩阵数据的事实源，`data/exports/` 中的 xlsx 只是导出物。
-2. 不手工修改最终 xlsx；修正只进 `data/config/`、`data/state/` 或人工覆盖文件，然后运行 `rebuild`。
+2. 不手工修改最终 xlsx；修正只进 `data/config/`、`data/state/` 或人工覆盖文件，然后运行 `build` 或离线 `export`。
 3. 译文按英文句子 md5 前 8 位缓存；关系标签按 `row_id|paper_key` 和引用段内容哈希缓存。
 4. 人工标签、人工译文优先级最高，不能被自动结果覆盖。
 5. `.env`、密钥、证书、真实研究数据、标签缓存、回归基线和运行日志不进入 Git。
@@ -73,72 +73,30 @@ GROBID 地址只从 `MATRIX_GROBID_URL` 读取；旧配置中的 `grobid_url` �
 
 ## 标准工作流
 
-### 推荐：PDF 文件夹一键生成
+将 PDF 放入 `data/seed_papers/`，运行 `python matrix_tool.py build`。
 
-将论文 PDF 放入 `data/seed_papers/`，运行：
+- build 始终只扫描标准目录本层 PDF；有效 TEI 复用，无缓存、损坏或已知 PDF 变化时解析。没有哈希的旧缓存先复用，不因此强制联网。
+- 移走 PDF 后旧论文退出矩阵，历史缓存不自动删除。build 不接受 --input-dir / --keep-existing。
+- import 从外部复制 PDF，可带 --from-tei；只准备输入，不联网、不构建。已经手动放好 PDF 时不需要 import。
+- export 只读最近 JSON 快照离线出表，不扫描 PDF、不抽取 TEI、不调用模型；可 --output 另存。
+- status 只读当前输入与最近快照；cache 查看缓存，cache clean 默认预览，只有 --apply 才删除解析文件。
+- cache clean --all --apply 包含当前解析文件；PDF、短名登记、译文池与人工覆盖始终保留，目标路径必须验证位于状态目录内。
 
 ```powershell
+python matrix_tool.py import "下载目录/论文.pdf"
+python matrix_tool.py import "论文.pdf" --from-tei "现成.tei.xml"
 python matrix_tool.py build
-python matrix_tool.py build --input-dir input
+python matrix_tool.py export
+python matrix_tool.py cache clean
 ```
 
-`build` / `add` 首次自动创建缺失配置并保留已有文件。`build` 只扫描指定文件夹本层的 PDF，根据内容哈希和 TEI 缓存增量解析，整批统一重建一次；默认将 `paper_order` 同步为当前目录的可用论文，历史元数据和缓存保留但不参与矩阵。`--keep-existing` 使用累加模式。普通 `init` 只创建空项目，旧数据迁移使用 `init --migrate-legacy`。
+正常构建自动处理所有缺译，不再在 500 句截断；格式缺失/截断/标记丢失会有限补试，分类缩小批次。低置信候选自动检查一次，有分歧保留可选复核标记，不强行放行，不阻断出表。已检查过的残留不确定不每次反复请求。网络故障停止本轮连续请求、保存进度，服务恢复后 build 续跑。
 
-`build`、`add`、`rebuild` 支持 `--no-llm` 跳过模型分类和翻译，复用缓存及人工结果；`--no-translate` 只跳过翻译。模型阶段显示批次/句数进度，网络请求异常后停止本轮连续调用并继续出表，失败兜底标签后续可重试。人工结果不得覆盖，切换目录不得删除历史缓存。
+build 支持 --no-llm、--no-translate、--relabel 和上下文窗口参数；--relabel 不能覆盖人工标签。人工标签与译文的导出/回填工具仅用于可选精修，导出只读快照，回填后仅离线刷新。
 
-### 加论文
+add 已兼容为 import，只导入；rebuild 已兼容为 export，仅离线出表；remove 退役，范围用 PDF 文件夹管理，清理用 cache。普通 init 创建空项目，旧三篇迁移用 init --migrate-legacy。
 
-```powershell
-python matrix_tool.py add data/seed_papers/新论文.pdf
-python matrix_tool.py add data/seed_papers/新论文.pdf --from-tei 现成.tei.xml
-```
-
-### 重建
-
-```powershell
-python matrix_tool.py rebuild
-python matrix_tool.py rebuild --no-translate
-python matrix_tool.py rebuild --relabel
-```
-
-重建顺序固定为：抽取 → 合并排序 → 关系标签 → 自动翻译 → 写 xlsx。`--relabel` 只强制重算非人工标签，人工覆盖保留。
-
-`rebuild` 只读取已登记 TEI，不扫描新 PDF。`remove` 保留 PDF，若不希望后续 `build` 重新导入，先将该 PDF 移出扫描目录。
-
-### 标签复核
-
-```powershell
-python matrix_tool.py export-labels
-python matrix_tool.py import-labels data/exports/relation_labels_时间戳.xlsx
-```
-
-默认只导出待复核项；全部导出使用 `export-labels --all`。人工只需编辑“人工标签”列：留空不修改，选择“自动”清除覆盖，其他值覆盖自动标签。
-
-### 译文维护
-
-```powershell
-python matrix_tool.py export-untranslated
-python matrix_tool.py import-translations data/exports/untranslated_时间戳.json
-```
-
-## 命令速查
-
-| 命令 | 作用 |
-| --- | --- |
-| `status` | 查看论文、行数、缺译、缺简写、标签复核状态 |
-| `build [--input-dir 文件夹]` | 扫描 PDF，首次自动初始化，增量解析后统一生成 |
-| `add` | 加论文并自动完成标签、翻译、重建 |
-| `rebuild` | 全量增量重建；支持 `--relabel`、`--no-translate` |
-| `export-labels [--all]` | 导出标签复核表 |
-| `import-labels 文件.xlsx` | 导入人工标签并重建 |
-| `export-untranslated` | 导出缺译句子 |
-| `import-translations 文件.json` | 回填人工译文并重建 |
-| `remove KEY` | 注销种子论文并重建 |
-| `init [--force]` | 创建空项目；已有项目补齐缺失配置，保留已有文件 |
-| `init --migrate-legacy [--force]` | 显式旧数据迁移；force 会替换论文登记表 |
-| `help [命令名]` | 查看快速上手、命令分组或单命令详情 |
-
-修改帮助系统时，同步维护 `COMMANDS_HELP`、`COMMAND_GROUPS`、`HELP_QUICKSTART` 和 `tests/test_help.py`。
+修改帮助系统时，同步维护 COMMANDS_HELP、COMMAND_GROUPS、HELP_QUICKSTART 和 tests/test_help.py。入口职责不得再次混合。
 
 ## 配置修正入口
 

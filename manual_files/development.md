@@ -35,6 +35,8 @@ python -m pytest -q
 - 低于 `0.60` 或 evidence 为空时进入待复核。
 - 默认 `export-labels` 只导出待复核项。
 
+自动检查是模型辅助的有限补救，不是独立评测；分歧继续保留不确定状态。正常构建不要求用户逐条审核。新命令职责以 `project_memory/design_20261106.md` 为准：build 自动构建、import 仅导入、export 仅快照离线导出、cache 显式清理。
+
 ## 隐私与提交
 
 `data/config` 真实配置、`data/state`、种子 PDF、导出物、`.env`、日志和回归基线均不提交。提交前检查 `git status --short`，不要使用 `git add -f` 添加被忽略文件。

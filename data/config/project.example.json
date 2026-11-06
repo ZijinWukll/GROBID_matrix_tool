@@ -1,7 +1,9 @@
 {
   "schema_version": 1,
   "output_path": "data/exports/matrix.xlsx",
-  "paper_order": ["PAPER1"],
+  "paper_order": [
+    "PAPER1"
+  ],
   "translation": {
     "engine": "openai-compatible",
     "source_lang": "en",
@@ -10,19 +12,22 @@
     "timeout": 60,
     "temperature": 0.2,
     "top_p": 0.95,
-    "max_tokens": 1024,
+    "max_tokens": 4096,
     "delay": 0.0,
-    "max_per_run": 500
+    "max_per_run": 500,
+    "repair_attempts": 2
   },
   "relationship_labeling": {
     "enabled": true,
-    "timeout": 30,
-    "batch_size": 8,
+    "timeout": 60,
+    "batch_size": 4,
     "review_threshold": 0.6,
     "temperature": 0.0,
     "top_p": 0.95,
-    "max_tokens": 1800,
-    "max_excerpt_chars": 2400
+    "max_tokens": 4096,
+    "max_excerpt_chars": 2400,
+    "repair_attempts": 2,
+    "auto_check": true
   },
   "context_window": {
     "before": 2,

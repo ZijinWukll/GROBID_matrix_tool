@@ -1,28 +1,36 @@
 # 科研矩阵表生长工具
 
-把种子论文持续整理成一张可重建的引用矩阵表：
+把种子论文整理成可持续更新的引用矩阵：
 
-`种子论文 → GROBID 解析 → 引用上下文抽取 → 关系标签 → 中文翻译 → xlsx`
+`PDF → GROBID / TEI 缓存 → 引用上下文 → 自动关系标签 → 中文翻译 → xlsx`
 
-将论文 PDF 放进 `data/seed_papers/`，运行 `python matrix_tool.py build`，即可批量解析并生成整张表。以后继续放入新论文，再运行同一个命令。
+## 日常只需一个命令
 
-## 快速开始
-
-### 1. 准备环境
+1. 将论文 PDF 放入 `data/seed_papers/`。
+2. 在项目根目录运行：
 
 ```powershell
-conda create -n matrix python=3.13  # 第一次新建
-conda activate matrix
-python -m pip install -r requirements.txt
+python matrix_tool.py build
 ```
 
-第一次使用时复制并填写本地模型配置：
+3. 打开 `data/exports/科研矩阵表_AgentMemory.xlsx`。
+
+以后添加、替换或移走论文，都修改这个 PDF 文件夹，再运行同一条命令。
+
+`build` 始终只扫描 `data/seed_papers/` 本层的 PDF（扩展名不区分大小写）。目录外论文和历史缓存不会自动混进矩阵，取消了 `--input-dir` 和 `--keep-existing`。
+
+有效 TEI 缓存直接复用；没有缓存、缓存损坏或已知 PDF 内容变化时重新解析。旧缓存缺少 PDF 哈希时先复用并补齐哈希。移走 PDF 只改变矩阵范围，不删除缓存。放回同一论文可继续复用。
+
+## 首次准备
 
 ```powershell
+conda create -n matrix python=3.13
+conda activate matrix
+python -m pip install -r requirements.txt
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-`.env` 示例：
+编辑 `.env`，填写可用连接：
 
 ```dotenv
 MATRIX_GROBID_URL=http://your-grobid-host:8070
@@ -31,163 +39,84 @@ MATRIX_LLM_API_KEY=EMPTY
 MATRIX_LLM_MODEL=your-model-id
 ```
 
-`.env` 只保存在本机，不会进入 Git。
+校园服务通常需要校园网络或 VPN。配置只保存在本机；`build` 会自动初始化项目，无需先 `init`。
 
-### 2. 放入 PDF，一条命令生成
+## 不同命令各做什么
 
-将所有种子论文 PDF 放入 `data/seed_papers/`，然后运行：
+- `build`：日常完整自动构建。同步 PDF 范围，抽取、补标签、补译、生成 Excel。
+- `import`：从下载目录复制 PDF 到标准目录，可带已有 TEI；只导入，不构建、不调用服务。已经手动放好 PDF 就不需要它。
+- `export`：从最近一次构建的 JSON 快照离线生成 Excel，不扫描 PDF、不读 TEI、不调用模型。适合恢复丢失的 Excel、另存文件或更新标题/简写显示。
+- `status`：只读查看当前输入和最近构建结果。
+- `cache`：查看缓存，或由用户明确执行清理。
 
 ```powershell
+python matrix_tool.py import "下载目录/论文.pdf"
+python matrix_tool.py import "下载目录/论文文件夹"
+python matrix_tool.py import "论文.pdf" --from-tei "现成.tei.xml"
 python matrix_tool.py build
+python matrix_tool.py export --output "data/exports/矩阵副本.xlsx"
+python matrix_tool.py status
 ```
 
-首次会自动创建项目配置，无需先运行 `init`。需要解析 PDF 时，确保 `.env` 中的 GROBID 可达；学校服务通常需要校园网络或 VPN。关系标签与中文翻译使用 `.env` 中配置的模型。
+`add` 保留为 `import` 的兼容入口，已不再单篇构建；`rebuild` 保留为 `export` 的兼容入口。`remove` 退役：移走 PDF 再 `build` 即可退出矩阵。
 
-程序只扫描文件夹本层的 `.pdf` / `.PDF`，按文件名顺序登记新增论文，保留已有列顺序。默认目录中的 PDF 保持原位；使用其他文件夹时，PDF 会复制到 `data/seed_papers/`。
+## 自动处理与中断恢复
 
-习惯使用项目根目录的 `input/` 时，创建该文件夹、放入 PDF 后运行：
+正常流程无需手动补译、分类或审核：
 
-```powershell
-python matrix_tool.py build --input-dir input
-```
+- 缺失/截断的分类输出会缩小批次并有限补试；使用短请求编号，减少长论文标识造成的格式问题。
+- 低置信或缺少依据的标签自动检查一次；分歧仍保留不确定标记，不强行制造确定结论，不阻断出表。
+- 翻译覆盖所有缺译句子，不再处理 500 句后要求手动重跑；空回复、输出截断或丢失引用标记会扩大预算后有限补试。
+- 成功分类逐批保存，译文按检查点及结束/中断保存；再次 `build` 只补未完成部分。
+- 连接失败时停止本轮后续模型请求，保留成功结果，以“待分类”和英文继续出表。服务恢复后再运行 `build`。
 
-每次批量处理后只统一导出一次。PDF 内容未变且 TEI 缓存存在时跳过解析；旧记录没有 PDF 哈希时会重新解析一次。中文文件名可直接使用。
+自动检查是模型辅助处理，不等于独立人工验证；保留的不确定标记仅供可选复核。不会用降低阈值或伪造译文的方式凑齐结果。
 
-**当前文件夹决定本轮矩阵包含哪些论文。** 换一批 PDF 后重新运行 `build`，旧论文会从矩阵中排除，TEI、译文和人工结果保留作缓存，无需手动删除。使用 `--input-dir` 时，以指定目录为准，标准目录的归档副本不额外加入。清空已使用的输入目录再构建，会生成不含论文的空表，避免留下误导的旧结果。
-
-想继续累加、保留不在当前文件夹中的论文，使用 `python matrix_tool.py build --keep-existing`，或沿用单篇 `add`。
-
-解析失败会显示具体文件，保存成功论文并生成本轮可用结果，同时以失败状态结束；失败的新版本不会冒用旧 TEI。全部 PDF 都解析失败时保留上一张表和原范围，不覆盖成功产物。修复后重跑同一命令即可续跑。新项目空目录只提示放入 PDF，不生成空表。
-
-抽取后会显示关系分类批次、翻译句数和 Excel 写入进度。模型请求失败时停止本轮连续请求，保留成功结果，以待复核标签和英文原文继续出表；服务恢复后运行 `build` 或 `rebuild` 补全。
-
-暂时只想拿到表格、跳过模型分类和翻译：
+临时只需要表格时：
 
 ```powershell
 python matrix_tool.py build --no-llm
 ```
 
-该选项仍会在需要时用 GROBID 解析 PDF；已有 TEI 时，可用 `python matrix_tool.py rebuild --no-llm` 完全离线重建当前矩阵。
+该选项跳过分类与翻译，但新 PDF 仍需 GROBID。`export` 才是完全离线的快照导出。`--no-translate` 仅跳过翻译；`build --relabel` 强制重算非人工标签；上下文可用 `build --window 3`。
 
-完成后打开 `data/exports/科研矩阵表_AgentMemory.xlsx`。查看状态：
-
-```powershell
-python matrix_tool.py status
-```
-
-### 3. 按需使用单篇或离线入口
-
-需要校园 VPN 连接 GROBID：
+## 缓存只手动清理
 
 ```powershell
-python matrix_tool.py add data/seed_papers/新论文.pdf
+python matrix_tool.py cache
+python matrix_tool.py cache clean
+python matrix_tool.py cache clean --apply
+python matrix_tool.py cache clean --all --apply
 ```
 
-无 VPN 时使用现成 TEI（首次同样会自动创建配置）：
+`clean` 默认仅预览不再使用、且 PDF 已移走的历史解析文件，`--apply` 才删除。`--all` 包含当前使用的解析文件，下次 `build` 会重建。PDF、论文短名登记、译文池和人工覆盖均保留。
 
-```powershell
-python matrix_tool.py add data/seed_papers/新论文.pdf --from-tei 现成.tei.xml
-```
+## 可选精修工具
 
-### 4. 修改配置后重建
-
-```powershell
-python matrix_tool.py rebuild
-```
-
-`rebuild` 只处理当前参与矩阵的论文 TEI，不扫描新 PDF、不改变论文范围、不调用 GROBID。重建流程：抽取 → 关系标签 → 翻译 → 写出 xlsx。只处理新增或缓存失效的标签和译文。
-
-只想提前创建空项目时可运行 `python matrix_tool.py init`，无需旧论文或网络。已有项目补齐缺失配置使用 `init --force`，保留已有配置、人工规则和论文；早期三篇种子的数据迁移仍可通过 `init --migrate-legacy` 使用，详见[日常操作](manual_files/operations.md)。
-
-## 关系标签复核
-
-关系标签用于快速判断“列对应论文”如何使用“行对应被引论文”：
-
-| 标签                 | 含义                                     |
-| -------------------- | ---------------------------------------- |
-| `B&E` 基于与拓展     | 基于、扩展、应用、受启发于或推广被引论文 |
-| `S&S` 支持与补充     | 引用、复用、补充或间接支持               |
-| `C&A` 对比与替代     | 比较、替代或从不同角度总结               |
-| `Q&A` 质疑与反驳     | 质疑、纠正或反驳                         |
-| `M/I` 简单提及或无关 | 仅提及或几乎无直接关系                   |
-
-默认复核流程：
+这些命令不是日常构建的必经步骤：
 
 ```powershell
 python matrix_tool.py export-labels
-python matrix_tool.py import-labels data/exports/relation_labels_时间戳.xlsx
+python matrix_tool.py import-labels "标签复核表.xlsx"
+python matrix_tool.py export-untranslated
+python matrix_tool.py import-translations "译文.json"
 ```
 
-打开复核表后，只修改“人工标签”列：
+导出只读最近快照；回填人工结果后仅离线刷新表格，不触发额外模型请求。人工标签与译文优先，自动过程不能覆盖。最终 Excel 是导出物，不能直接手改。
 
-- 标签正确：留空，不需要操作。
-- 标签错误：从下拉框选择正确标签。
-- 清除已有覆盖：选择“自动”。
-
-默认只导出 `needs_review=true` 的单元格。需要查看全部标签时使用：
+## 开发与文档
 
 ```powershell
-python matrix_tool.py export-labels --all
+python matrix_tool.py status
+python -m pytest -q
 ```
 
-最终矩阵表位于 `data/exports/科研矩阵表_AgentMemory.xlsx`。不要直接编辑最终 xlsx，所有修正都应进入配置、标签覆盖或译文池后重新 rebuild。
+核心在 `src/matrix_tool.py`，根目录 `matrix_tool.py` 是兼容入口。配置、状态、PDF 和导出物分别位于 `data/config/`、`data/state/`、`data/seed_papers/`、`data/exports/`。
 
-## 常用命令
-
-| 命令                                                  | 作用                                       |
-| ----------------------------------------------------- | ------------------------------------------ |
-| `python matrix_tool.py build`                         | 扫描默认 PDF 文件夹并一键生成；首次自动初始化 |
-| `python matrix_tool.py build --input-dir input`        | 从指定文件夹批量导入并生成 |
-| `python matrix_tool.py build --keep-existing`          | 累加构建，保留输入目录之外的论文 |
-| `python matrix_tool.py build --no-llm`                 | 跳过模型分类与翻译，直接生成表格 |
-| `python matrix_tool.py status`                        | 查看论文、行数、缺译、缺简写和标签复核状态 |
-| `python matrix_tool.py add data/seed_papers/文件.pdf` | 添加种子论文并重建                         |
-| `python matrix_tool.py rebuild`                       | 重新分类、翻译并生成 xlsx                  |
-| `python matrix_tool.py rebuild --relabel`             | 强制重新分类全部非人工标签                 |
-| `python matrix_tool.py init [--force]`                | 创建空项目；已有项目仅补齐缺失配置 |
-| `python matrix_tool.py export-labels [--all]`         | 导出关系标签复核表                         |
-| `python matrix_tool.py import-labels 文件.xlsx`       | 回填人工标签并重建                         |
-| `python matrix_tool.py export-untranslated`           | 导出缺译句子                               |
-| `python matrix_tool.py import-translations 文件.json` | 回填人工译文并重建                         |
-| `python matrix_tool.py help [命令名]`                 | 查看中文帮助                               |
-
-`build`、`add` 和 `rebuild` 均支持 `--no-translate`，只跳过本轮自动翻译，关系标签仍按配置执行。
-
-## 目录结构
-
-```text
-Grobid_Demo_Codes/
-├── matrix_tool.py            # 兼容 CLI 入口
-├── src/                      # Python 实现
-├── tests/                    # 冒烟、回归和标签测试
-├── scripts/                  # PowerShell / Bash 封装
-├── data/
-│   ├── config/               # 本地配置、规则和人工覆盖
-│   ├── state/                # TEI、抽取 JSON、译文池和标签缓存
-│   ├── seed_papers/          # 种子论文 PDF
-│   └── exports/              # xlsx、复核表和缺译清单
-├── project_memory/           # 架构、决策、迁移记录
-├── road_map/                 # 路线图、时间线和待办
-├── manual_files/             # 操作、配置、排障和开发手册
-├── log/                      # CHANGELOG 与按日运行日志
-└── README.md
-```
-
-## 核心约定
-
-1. `data/state/papers/<KEY>.json` 是矩阵数据的唯一事实源。
-2. `data/exports/` 下的 xlsx 是导出物，可以随时重新生成。
-3. 译文按英文句子的 md5 前 8 位缓存，原文不变则译文不会丢。
-4. 关系标签按 `<row_id>|<paper_key>` 和引用段内容哈希缓存。
-5. 人工标签和人工译文优先于自动结果。
-6. GROBID 和本地 LLM 地址统一放在 `.env`，脚本和示例配置不保存学校真实地址。
-7. `data/config/`、`data/state/`、`data/seed_papers/`、`data/exports/`、`.env` 和运行日志默认不提交 Git。
-
-## 文档导航
+真实配置、密钥、论文、TEI、译文池、人工覆盖、运行日志和私有回归基线不进入 Git。
 
 - [日常操作](manual_files/operations.md)
 - [配置说明](manual_files/configuration.md)
 - [故障排查](manual_files/troubleshooting.md)
-- [开发与测试](manual_files/development.md)
-- [项目架构](project_memory/architecture.md)
-- [关键决策](project_memory/decisions.md)
+- [架构](project_memory/architecture.md)
+- [本次设计](project_memory/design_20261106.md)

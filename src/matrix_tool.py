@@ -3,17 +3,12 @@
 把"种子论文 → GROBID 解析 → 引用上下文抽取 → 矩阵表"的流水线做成可持续生长的工具：
 每加一篇种子论文，自动解析、抽取、跨论文去重合并、按"总内部引用次数"降序重建整张表。
 
-用法（用 miniconda 的 python，不要用裸 python）:
-  python matrix_tool.py build                                                # 扫描 data/seed_papers，增量解析后统一生成
-  python matrix_tool.py init                                                 # 可选：创建空项目，不需要旧数据或网络
-  python matrix_tool.py init --migrate-legacy                                # 迁移现有旧种子论文并自检对账
-  ... matrix_tool.py add data/seed_papers/新论文.pdf [--key KEY] [--force]    # 加新种子（需校园 VPN 连 GROBID）
-  ... matrix_tool.py add X.pdf --from-tei 现成.tei.xml                        # 离线入口：直接用现成 TEI，无需 VPN
-  ... matrix_tool.py rebuild                                                 # 改过 data/config 或译文后全量重建
-  ... matrix_tool.py export-untranslated                                     # 导出缺译句子清单
-  ... matrix_tool.py import-translations 译文.json                           # 回填译文（{hash:中文} 或 {英文句:中文}）
-  ... matrix_tool.py remove KEY                                              # 注销某篇种子并重建
-  ... matrix_tool.py status                                                  # 查看现状
+用法（在项目环境中运行）:
+  python matrix_tool.py build                 # 唯一自动构建入口，范围只看 seed_papers
+  python matrix_tool.py import 论文.pdf       # 从外部归档 PDF，可附 --from-tei
+  python matrix_tool.py export                # JSON 快照离线导出
+  python matrix_tool.py status                # 只读状态
+  python matrix_tool.py cache clean           # 预览手动缓存清理，--apply 才删除
 
 架构约定（为将来云协作预留，见 README）:
   - data/state/papers/<KEY>.json 是唯一事实源；xlsx 只是导出物，永远不要手改
@@ -79,7 +74,7 @@ DEFAULT_CONTEXT_WINDOW = {"before": 2, "after": 2}
 # 自动翻译后端：OpenAI 兼容接口（学校本地 vLLM）。连接信息只从环境变量读取。
 TRANSLATION_SYSTEM_PROMPT = (
     "你是学术论文翻译助手。请把用户给出的英文句子翻译成简体中文。"
-    "只输出译文，不要解释，不要加引号，不要保留英文原文。"
+    "只输出译文，不要解释，不要加引号，不要保留英文原文。保留所有 [[数字]] 引用标记，不增删标记。"
 )
 DEFAULT_TRANSLATION = {
     "engine": "openai-compatible",
@@ -89,9 +84,10 @@ DEFAULT_TRANSLATION = {
     "timeout": 60,
     "temperature": 0.2,
     "top_p": 0.95,
-    "max_tokens": 1024,
+    "max_tokens": 4096,
     "delay": 0.0,
-    "max_per_run": 500,  # 单次重建最多自动翻译的句数上限
+    "max_per_run": 500,  # 兼容字段：分批检查点，不再截断整个构建
+    "repair_attempts": 2,
 }
 
 TRANSLATION_ENV_VARS = {
@@ -111,13 +107,15 @@ RELATION_LABELS = {
 RELATION_LABEL_PRIORITY = ["Q&A", "C&A", "B&E", "S&S", "M/I"]
 DEFAULT_RELATIONSHIP_LABELING = {
     "enabled": True,
-    "timeout": 30,
-    "batch_size": 8,
+    "timeout": 60,
+    "batch_size": 4,
     "review_threshold": 0.60,
     "temperature": 0.0,
     "top_p": 0.95,
-    "max_tokens": 1800,
+    "max_tokens": 4096,
     "max_excerpt_chars": 2400,
+    "repair_attempts": 2,
+    "auto_check": True,
 }
 
 
@@ -588,7 +586,7 @@ def relation_label_display(value) -> str:
 
 
 def needs_relation_review(confidence: float, evidence: str, threshold: float) -> bool:
-    """仅低置信度或完全缺少依据时进入人工复核。"""
+    """仅低置信度或完全缺少依据时保留可选复核标记。"""
     return float(confidence) < float(threshold) or not str(evidence or "").strip()
 
 
@@ -944,16 +942,16 @@ def print_render_summary(stats: dict):
     if "label_auto_count" in stats:
         print(f"  关系标签: 自动 {stats.get('label_auto_count', 0)}, "
               f"人工 {stats.get('label_manual_count', 0)}, "
-              f"待复核 {stats.get('label_needs_review', 0)}, "
+              f"可选复核 {stats.get('label_needs_review', 0)}, "
               f"失败兜底 {stats.get('label_failed', 0)}")
     if stats["missing_trans"]:
         print(f"  [缺译] {len(stats['missing_trans'])} 句先显示英文原文，"
-              f"用 export-untranslated / import-translations 回填")
+              f"服务恢复后再次 build 会自动补齐；人工精修仅为可选操作")
     if stats["no_abbrev"]:
         show = "；".join(t[:40] for t in stats["no_abbrev"][:5])
         more = " 等" if len(stats["no_abbrev"]) > 5 else ""
-        print(f"  [缺简写] {len(stats['no_abbrev'])} 行（{show}{more}），"
-              f"可在 data/config/abbrev_rules.json 增补规则")
+        print(f"  [无专用简写] {len(stats['no_abbrev'])} 行（{show}{more}），"
+              f"不影响构建，可选自定义显示规则")
     print(f"  已写出: {stats['out_path']}")
 
 
@@ -1133,6 +1131,8 @@ def translate_via_llm(text: str, cfg: dict, client=None, *, raise_errors=False) 
             top_p=float(cfg.get("top_p", 0.95)),
             max_tokens=int(cfg.get("max_tokens", 1024)),
         )
+        if getattr(response.choices[0], "finish_reason", None) == "length":
+            return ""
         content = response.choices[0].message.content
         return content.strip() if isinstance(content, str) else ""
     except Exception:
@@ -1143,7 +1143,8 @@ def translate_via_llm(text: str, cfg: dict, client=None, *, raise_errors=False) 
 
 def _parse_relation_label_response(content: str, expected_ids: set[str]) -> dict:
     try:
-        data = json.loads(content)
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)
+        data = json.loads(cleaned)
     except Exception:
         return {}
     if isinstance(data, dict) and isinstance(data.get("items"), list):
@@ -1184,15 +1185,16 @@ def _classify_relation_batch(items: list[dict], cfg: dict, client) -> dict:
 冲突时严格按 Q&A > C&A > B&E > S&S > M/I 选择一个主标签。
 evidence 必须是 excerpt 中真实出现的一句短依据；无法找到直接依据时选 M/I。
 只输出 JSON 对象：{"items":[{"id":"...","label":"B&E","confidence":0.0,"evidence":"direct quote"}]}"""
+    aliases = {f"item_{i + 1}": item["id"] for i, item in enumerate(items)}
     payload = {"items": [
         {
-            "id": item["id"],
+            "id": f"item_{i + 1}",
             "current_paper": item["current_paper"],
             "cited_paper": item["cited_paper"],
             "cited_year": item.get("cited_year", ""),
             "excerpt": item["excerpt"][: int(cfg.get("max_excerpt_chars", 2400))],
         }
-        for item in items
+        for i, item in enumerate(items)
     ]}
     response = client.chat.completions.create(
         model=cfg["model"],
@@ -1206,7 +1208,30 @@ evidence 必须是 excerpt 中真实出现的一句短依据；无法找到直�
         response_format={"type": "json_object"},
     )
     content = response.choices[0].message.content
-    return _parse_relation_label_response(content or "", {item["id"] for item in items})
+    parsed = _parse_relation_label_response(content or "", set(aliases) | set(aliases.values()))
+    return {aliases.get(key, key): value for key, value in parsed.items()}
+
+
+def recovery_cfg(cfg: dict) -> dict:
+    """仅对有效响应中的截断/缺失输出扩大预算；网络错误交由调用方快速停止。"""
+    return {**cfg, "max_tokens": min(int(cfg.get("max_tokens", 1800)) * 2,
+                                   max(16384, int(cfg.get("max_tokens", 1800))))}
+
+
+def classify_with_recovery(items: list[dict], cfg: dict, client, attempts=None) -> dict:
+    attempts = max(0, int(cfg.get("repair_attempts", 2))) if attempts is None else attempts
+    results = _classify_relation_batch(items, cfg, client)
+    missing = [item for item in items if item["id"] not in results]
+    if missing and attempts:
+        retry_cfg = recovery_cfg(cfg)
+        if len(missing) == 1:
+            results.update(classify_with_recovery(missing, retry_cfg, client, attempts - 1))
+        else:
+            middle = (len(missing) + 1) // 2
+            for part in (missing[:middle], missing[middle:]):
+                if part:
+                    results.update(classify_with_recovery(part, retry_cfg, client, attempts - 1))
+    return results
 
 
 def auto_label_missing(rows: list, project: dict, quiet: bool = False,
@@ -1217,6 +1242,7 @@ def auto_label_missing(rows: list, project: dict, quiet: bool = False,
              "needs_review": 0, "failed": 0, "classified": 0,
              "cached": 0, "fallback": 0}
     if cfg is None:
+        empty["labels"] = effective_relation_labels(rows, project)
         return empty
 
     cache = load_relation_label_cache()
@@ -1243,9 +1269,11 @@ def auto_label_missing(rows: list, project: dict, quiet: bool = False,
 
             existing = cache.get(key) or {}
             existing_label = normalize_relation_label(existing.get("label"))
-            if (not relabel and existing_label and not _is_fallback_label(existing)
+            review = needs_relation_review(float(existing.get("confidence", 0) or 0), existing.get("evidence", ""), float(cfg.get("review_threshold", 0.6)))
+            auto_check = review and not existing.get("auto_checked") and cfg.get("auto_check", True)
+            if (not relabel and not auto_check and existing_label and not _is_fallback_label(existing)
                     and existing.get("content_hash") == source_hash):
-                review = needs_relation_review(
+                review = bool(existing.get("review_reason")) or needs_relation_review(
                     float(existing.get("confidence", 0.0) or 0.0),
                     existing.get("evidence", ""),
                     float(cfg.get("review_threshold", 0.60)),
@@ -1286,16 +1314,52 @@ def auto_label_missing(rows: list, project: dict, quiet: bool = False,
 
     threshold = float(cfg.get("review_threshold", 0.60))
     def record(item, result):
-        nonlocal auto_count, classified, failed, needs_review
+        nonlocal auto_count, classified, failed, needs_review, service_unavailable
         key = item["id"]
+        old = cache.get(key) or {}
+        if (not result and normalize_relation_label(old.get("label")) and not _is_fallback_label(old)
+                and old.get("content_hash") == item["content_hash"]):
+            new_cache[key] = dict(old)
+            labels[key] = {**old, "source": "auto", "needs_review": True}
+            auto_count += 1
+            failed += 1
+            needs_review += 1
+            return
         if result:
             label = result["label"]
             confidence = result["confidence"]
             evidence = result["evidence"]
             review = needs_relation_review(confidence, evidence, threshold)
+            checked = False
+            reason = ""
+            old_review = (old.get("content_hash") == item["content_hash"] and
+                          normalize_relation_label(old.get("label")) and not _is_fallback_label(old) and
+                          needs_relation_review(float(old.get("confidence", 0) or 0), old.get("evidence", ""), threshold))
+            if old_review:
+                checked = True
+                if old["label"] != label:
+                    reason = "自动检查与缓存候选存在分歧"
+                    review = True
+            if review and not checked and cfg.get("auto_check", True) and not service_unavailable:
+                checked = True
+                try:
+                    second = classify_with_recovery([item], recovery_cfg(cfg), llm_client, attempts=1).get(key)
+                except Exception:
+                    second = None
+                    checked = False
+                    service_unavailable = True
+                    reason = "自动检查服务暂不可用"
+                if second and second["label"] == label:
+                    if second["confidence"] > confidence and second.get("evidence"):
+                        label, confidence, evidence = second["label"], second["confidence"], second["evidence"]
+                        review = needs_relation_review(confidence, evidence, threshold)
+                elif second:
+                    reason = "自动检查存在分歧"
+                    review = True
             entry = {"label": label, "confidence": confidence, "evidence": evidence,
                      "content_hash": item["content_hash"], "needs_review": review,
-                     "model": cfg.get("model", ""), "source": "auto"}
+                     "model": cfg.get("model", ""), "source": "auto",
+                     "auto_checked": checked, "review_reason": reason}
             labels[key] = {"label": label, "source": "auto", "confidence": confidence,
                            "evidence": evidence, "needs_review": review}
             new_cache[key] = entry
@@ -1320,7 +1384,7 @@ def auto_label_missing(rows: list, project: dict, quiet: bool = False,
         batch_total = (len(pending) + batch_size - 1) // batch_size
         if not quiet:
             print(f"关系分类：待处理 {len(pending)} 格，共 {batch_total} 批；"
-                  f"单次读取超时 {cfg.get('timeout', 30)} 秒，无自动重试。", flush=True)
+                  f"单次读取超时 {cfg.get('timeout', 60)} 秒；缺失输出自动补试，网络错误不逐条重试。", flush=True)
         try:
             llm_client = client or build_llm_client(cfg)
             empty_batches = 0
@@ -1329,11 +1393,15 @@ def auto_label_missing(rows: list, project: dict, quiet: bool = False,
                 if not quiet:
                     print(f"  关系分类 [{start // batch_size + 1}/{batch_total}] "
                           f"已处理 {completed}/{len(pending)} 格 ...", flush=True)
-                results = _classify_relation_batch(batch, cfg, llm_client)
+                results = classify_with_recovery(batch, cfg, llm_client)
                 for item in batch:
                     record(item, results.get(item["id"]))
                 completed += len(batch)
                 write_relation_label_cache(new_cache)
+                if service_unavailable:
+                    if not quiet:
+                        print("自动检查服务不可用，已保留首次有效分类，停止本轮后续模型请求。", flush=True)
+                    break
                 empty_batches = empty_batches + 1 if not results else 0
                 if empty_batches >= 2:
                     if not quiet:
@@ -1364,12 +1432,14 @@ def auto_label_missing(rows: list, project: dict, quiet: bool = False,
     }
     if not quiet:
         print(f"  关系标签: 自动 {auto_count}（缓存 {cached_count}, 新分类 {classified}）, "
-              f"人工 {manual_count}, 待复核 {needs_review}, 失败兜底 {failed}")
+              f"人工 {manual_count}, 可选复核 {needs_review}, 失败兜底 {failed}")
     return stats
 
 
 def _is_fallback_label(entry: dict) -> bool:
     # 兼容旧版未写 source 的网络失败兜底，服务恢复后可自动重试。
+    if entry.get("source") in ("auto", "manual"):
+        return False
     return (entry.get("source") == "fallback" or
             (entry.get("label") == "M/I" and float(entry.get("confidence", 0) or 0) == 0
              and not entry.get("evidence")))
@@ -1440,21 +1510,29 @@ def auto_translate_missing(rows: list, project: dict, quiet: bool = False,
     if not quiet:
         print(f"  自动翻译: 发现 {len(missing)} 句缺译，使用本地模型 "
               f"{cfg['model']} 开始翻译 ...")
-    limit = max(0, int(cfg.get("max_per_run", 500)))
+    limit = max(1, int(cfg.get("max_per_run", 500)) or len(missing))
     translated = failed = 0
     delay = cfg.get("delay", 0.0)
     attempted = 0
     service_unavailable = False
     try:
-        llm_client = (client or build_llm_client(cfg)) if limit else None
+        llm_client = client or build_llm_client(cfg)
         empty_results = 0
-        for h, s in missing[:limit]:
+        for h, s in missing:
             if not quiet:
-                print(f"  翻译 [{attempted + 1}/{min(limit, len(missing))}] "
+                print(f"  翻译 [{attempted + 1}/{len(missing)}] "
                       f"已完成 {translated} 句 ...", flush=True)
             attempted += 1
             try:
-                cn = translate_via_llm(s, cfg, client=llm_client, raise_errors=True)
+                request_cfg = dict(cfg)
+                cn = ""
+                for attempt in range(max(0, int(cfg.get("repair_attempts", 2))) + 1):
+                    cn = translate_via_llm(s, request_cfg, client=llm_client, raise_errors=True)
+                    markers = set(re.findall(r"\[\[\d+\]\]", s))
+                    if cn and cn.lower() != s.lower() and markers.issubset(set(re.findall(r"\[\[\d+\]\]", cn))):
+                        break
+                    cn = ""
+                    request_cfg = recovery_cfg(request_cfg)
             except Exception:
                 failed += 1
                 raise
@@ -1462,7 +1540,7 @@ def auto_translate_missing(rows: list, project: dict, quiet: bool = False,
                 pool[h] = cn
                 translated += 1
                 empty_results = 0
-                if translated % 10 == 0:
+                if translated % min(10, limit) == 0:
                     write_pool(pool)
             else:
                 failed += 1
@@ -1835,6 +1913,23 @@ def _pdf_hash(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def valid_tei_text(text: str) -> bool:
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(text)
+        return root.tag.rsplit("}", 1)[-1] == "TEI" and any(
+            node.tag.rsplit("}", 1)[-1] == "text" for node in root.iter())
+    except ET.ParseError:
+        return False
+
+
+def valid_tei_cache(path: Path) -> bool:
+    try:
+        return valid_tei_text(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError):
+        return False
+
+
 def _check_grobid(project: dict) -> str:
     base = load_grobid_url(project)
     if not base:
@@ -1850,10 +1945,9 @@ def _check_grobid(project: dict) -> str:
     return base
 
 
-def _register_paper(project: dict, key: str, pdf: Path | None, tei_text: str):
+def _register_paper(project: dict, key: str, pdf: Path | None, tei_text: str, *, activate=True):
     """供单篇与批量入口复用：验证解析结果，保存单篇状态并登记，不重建整表。"""
-    soup = BeautifulSoup(tei_text, "xml")
-    if soup.find("TEI") is None or soup.find("text") is None:
+    if not valid_tei_text(tei_text):
         raise ValueError("解析结果不是有效的论文 TEI XML，请检查 GROBID 返回内容")
     previous = project["papers"].get(key, {})
     data = extract_paper(key, tei_text, load_alias_cfg().get(key, {}),
@@ -1878,7 +1972,7 @@ def _register_paper(project: dict, key: str, pdf: Path | None, tei_text: str):
     write_json(PAPERS_STATE_DIR / f"{key}.json",
                {"schema_version": PAPERS_SCHEMA_VERSION, "key": key, **data})
     project["papers"][key] = info
-    if key not in project["paper_order"]:
+    if activate and key not in project["paper_order"]:
         project["paper_order"].append(key)
     write_json(CONFIG_DIR / "project.json", project)
     return data
@@ -1886,10 +1980,7 @@ def _register_paper(project: dict, key: str, pdf: Path | None, tei_text: str):
 
 def cmd_build(args):
     project = ensure_project()
-    source = Path(args.input_dir).expanduser() if args.input_dir else INPUT_SEED_DIR
-    if not source.is_absolute():
-        source = ROOT / source
-    source = source.resolve()
+    source = INPUT_SEED_DIR.resolve()
     if not source.is_dir():
         sys.exit(f"PDF 文件夹不存在: {source} —— 请先创建文件夹并放入 PDF")
     pdfs = sorted((p for p in source.iterdir() if p.is_file() and p.suffix.lower() == ".pdf"),
@@ -1912,16 +2003,22 @@ def cmd_build(args):
         seen.add(key)
         selected.append(key)
         info = project["papers"].get(key)
+        orphan_tei = PAPERS_STATE_DIR / f"{key}.tei.xml"
+        if not info and valid_tei_cache(orphan_tei):
+            _register_paper(project, key, pdf, orphan_tei.read_text(encoding="utf-8"), activate=False)
+            info = project["papers"][key]
         if info and (not info.get("pdf") or (ROOT / info["pdf"]).resolve() != destination):
             sys.exit(f"PDF 与已登记论文标识冲突: {pdf.name}（{key}）—— 请更改文件名或使用 add --key")
-        if (info and info.get("pdf_sha256") == _pdf_hash(pdf)
-                and (ROOT / info["tei"]).is_file()):
+        if (info and (not info.get("pdf_sha256") or info["pdf_sha256"] == _pdf_hash(pdf))
+                and valid_tei_cache(ROOT / info["tei"])):
+            if not info.get("pdf_sha256"):
+                info["pdf_sha256"] = _pdf_hash(pdf)
             cached += 1
             available.add(key)
         else:
             pending.append((key, pdf))
     if not pdfs and not project["paper_order"]:
-        print("未找到 PDF。请将论文 PDF 放入 data/seed_papers（或 --input-dir 指定的文件夹），再运行 build。")
+        print("未找到 PDF。请将论文 PDF 放入 data/seed_papers，或先用 import 导入，再运行 build。")
         return
     base = _check_grobid(project) if pending else None
     failed = []
@@ -1938,11 +2035,8 @@ def cmd_build(args):
     # 当前文件夹决定本轮矩阵范围；只保留本次成功解析或命中有效缓存的论文。
     # 全部解析失败时保留上一张表与登记，避免用空结果覆盖成功产物。
     if available or not pdfs:
-        if args.keep_existing:
-            active_order = list(dict.fromkeys(original_order + [k for k in selected if k in available]))
-        else:
-            active_order = [k for k in original_order if k in available]
-            active_order += [k for k in selected if k in available and k not in active_order]
+        active_order = [k for k in original_order if k in available]
+        active_order += [k for k in selected if k in available and k not in active_order]
         excluded = [k for k in original_order if k not in active_order]
         project["paper_order"] = active_order
         write_json(CONFIG_DIR / "project.json", project)
@@ -1972,90 +2066,9 @@ def _cli_window(args):
     return max(0, int(before)), max(0, int(after))
 
 
-def cmd_add(args):
-    project = ensure_project()
-    if not args.pdf and not args.from_tei:
-        sys.exit("请提供 PDF 路径，或使用 --from-tei 指定已有 TEI 文件")
-
-    pdf_abs = None
-    if args.pdf:
-        pdf_abs = Path(args.pdf).expanduser()
-        if not pdf_abs.exists():
-            pdf_abs = ROOT / args.pdf
-        if not pdf_abs.exists():
-            sys.exit(f"找不到 PDF: {args.pdf}")
-        pdf_abs = pdf_abs.resolve()
-
-    key = _resolve_key(project, pdf_abs, args.key)
-    if pdf_abs is not None:
-        destination = (INPUT_SEED_DIR / pdf_abs.name).resolve()
-        for existing_key, info in project["papers"].items():
-            pdf_rel = info.get("pdf")
-            if pdf_rel and (ROOT / pdf_rel).resolve() in (pdf_abs, destination):
-                if not args.key:
-                    key = existing_key
-                elif key != existing_key:
-                    sys.exit(f"PDF 归档路径与已登记论文冲突: {pdf_abs.name}（{existing_key}）—— "
-                             "请更改文件名，或使用原论文短名配合 --force 更新")
-    if key in project["paper_order"] and not args.force:
-        sys.exit(f"种子论文 {key} 已存在（重新解析请加 --force；删除用 remove {key}）")
-
-    before_project = project
-    if key in project["papers"] and not (ROOT / project["papers"][key]["tei"]).is_file():
-        print(f"{key} 的 TEI 缓存缺失，本次重新解析修复。")
-        before_project = {**project, "paper_order": [k for k in project["paper_order"] if k != key]}
-    before = rows_for_diff(before_project)
-
-    # 取 TEI：离线入口或 GROBID 解析
-    if args.from_tei:
-        tei_src = Path(args.from_tei).expanduser()
-        if not tei_src.exists():
-            tei_src = ROOT / args.from_tei
-        if not tei_src.exists():
-            sys.exit(f"找不到 TEI 文件: {args.from_tei}")
-        tei_text = tei_src.read_text(encoding="utf-8")
-        print(f"使用现成 TEI: {tei_src}")
-    else:
-        base = _check_grobid(project)
-        print(f"GROBID 解析中（约需 1-2 分钟）: {pdf_abs.name} ...")
-        tei_text = grobid_fulltext(base, pdf_abs)
-
-    data = _register_paper(project, key, pdf_abs, tei_text)
-    win = load_window_cfg(project, _cli_window(args))
-    header = project["papers"][key]["header"]
-
-    print(f"已注册种子论文 {key}: 参考文献 {len(data['refs_meta'])} 条, "
-          f"有上下文 {len(data['contexts'])} 条, 表头 = {header[:60]!r}")
-
-    rows, stats = rebuild_all(project, quiet=True, no_translate=args.no_translate,
-                              window=win, relabel=args.relabel, no_llm=args.no_llm)
-
-    after = {r["id"]: r for r in rows}
-    added = [i for i in after if i not in before]
-    updated = [i for i in after
-               if i in before and after[i]["per_paper"] != before[i]["per_paper"]]
-    print(f"\n表格重建: {stats['rows']} 行（新增 {len(added)} 行, "
-          f"更新 {len(updated)} 行）")
-    for rid in added[:5]:
-        print(f"  + {after[rid]['display_title'][:60]}")
-
-    n_new_missing = 0
-    if stats["missing_trans"]:
-        before_sents = {s for r in before.values()
-                        for i in r["per_paper"].values() for s in iter_sentence_texts(i)}
-        n_new_missing = sum(1 for s in stats["missing_trans"] if s not in before_sents)
-    if stats["missing_trans"]:
-        path_txt, path_json = export_untranslated(project, quiet=True)
-        print(f"  缺译 {len(stats['missing_trans'])} 句（其中新增 {n_new_missing} 句）"
-              f" -> {path_txt.name} / {path_json.name}")
-    else:
-        print("  缺译 0 句")
-    print_render_summary(stats)
-
-
 def export_untranslated(project: dict, quiet: bool = False):
     """把缺译句子写成 {hash: 英文句} JSON（把值改成中文即可 import 回填）+ 可读 txt。"""
-    rows = sort_rows(compute_rows(papers_data_fresh(project), load_fixes()))
+    rows = sort_rows(compute_rows(snapshot_data(project), load_fixes()))
     trans = load_pool()
     missing = []
     for r in rows:
@@ -2087,9 +2100,8 @@ def cmd_export(args):
 
 def cmd_export_labels(args):
     project = load_project()
-    rows = sort_rows(compute_rows(papers_data_fresh(project), load_fixes()))
-    stats = auto_label_missing(rows, project)
-    export_relation_labels(rows, project, labels=stats.get("labels", {}),
+    rows = sort_rows(compute_rows(snapshot_data(project), load_fixes()))
+    export_relation_labels(rows, project, labels=effective_relation_labels(rows, project),
                            include_all=args.all)
 
 
@@ -2106,7 +2118,7 @@ def cmd_import_labels(args):
         sys.exit(f"标签导入失败，未写入任何修改: {exc}")
     write_relation_label_overrides(updated)
     print(f"人工标签覆盖已更新: {len(overrides)} -> {len(updated)} 条")
-    rebuild_all(load_project())
+    cmd_export_snapshot(args)
 
 
 def cmd_import(args):
@@ -2137,33 +2149,145 @@ def cmd_import(args):
     write_pool(pool)
     print(f"译文池合并完成: 新增 {added} 条, 更新 {updated} 条, "
           f"跳过 {skipped} 条, 现共 {len(pool)} 条")
-    rebuild_all(load_project())
+    cmd_export_snapshot(args)
+
+
+def snapshot_data(project: dict, *, strict=True) -> dict:
+    """只读最近构建的单篇 JSON，不扫描 PDF、不重新抽取 TEI。"""
+    data = {}
+    for key in project["paper_order"]:
+        path = PAPERS_STATE_DIR / f"{key}.json"
+        if not path.is_file():
+            if strict:
+                sys.exit(f"缺少构建快照: {key} —— 请运行 build，或放回 PDF 后构建")
+            continue
+        cached = load_json(path)
+        data[key] = {"refs_meta": cached["refs_meta"], "contexts": cached["contexts"]}
+    return data
+
+
+def cmd_export_snapshot(args):
+    project = load_project()
+    if getattr(args, "output", None):
+        project = {**project, "output_path": args.output}
+    rows = sort_rows(compute_rows(snapshot_data(project), load_fixes()))
+    stats = render_xlsx(rows, project, effective_relation_labels(rows, project))
+    print("离线导出完成：复用最近构建快照，没有扫描 PDF、抽取或请求模型。")
+    print_render_summary(stats)
+
+
+def cmd_import_papers(args):
+    project = ensure_project()
+    paths = []
+    for raw in args.files:
+        path = Path(raw).expanduser().resolve()
+        if path.is_dir():
+            paths.extend(sorted((p for p in path.iterdir() if p.is_file() and p.suffix.lower() == ".pdf"), key=lambda p: p.name.casefold()))
+        elif path.is_file() and path.suffix.lower() == ".pdf":
+            paths.append(path)
+        else:
+            sys.exit(f"不是 PDF 或文件夹: {raw}")
+    if not paths:
+        sys.exit("没有可导入的 PDF")
+    if (args.from_tei or args.key) and len(paths) != 1:
+        sys.exit("--from-tei 和 --key 仅适用于单篇导入")
+    if args.key and not args.from_tei:
+        sys.exit("--key 需要同时提供 --from-tei；普通 PDF 导入直接使用文件名即可")
+    tei_text = None
+    if args.from_tei:
+        tei_path = Path(args.from_tei).expanduser().resolve()
+        if not tei_path.is_file():
+            sys.exit(f"找不到 TEI: {tei_path}")
+        tei_text = tei_path.read_text(encoding="utf-8")
+        if not valid_tei_text(tei_text):
+            sys.exit("导入失败：不是有效的 TEI XML")
+    planned = {}
+    for path in paths:
+        destination = (INPUT_SEED_DIR / path.name).resolve()
+        if destination in planned and _pdf_hash(planned[destination]) != _pdf_hash(path):
+            sys.exit(f"同名 PDF 冲突: {path.name}")
+        if (destination.exists() and destination != path and not args.replace
+                and _pdf_hash(destination) != _pdf_hash(path)):
+            sys.exit(f"同名 PDF 已存在: {path.name} —— 如需更新请加 --replace")
+        planned[destination] = path
+    if tei_text is not None:
+        destination = next(iter(planned))
+        key = next((k for k, v in project["papers"].items() if v.get("pdf") and (ROOT / v["pdf"]).resolve() == destination), None)
+        key = (_resolve_key(project, next(iter(planned.values())), args.key) if args.key
+               else key or _resolve_key(project, next(iter(planned.values())), None))
+        if key in project["papers"] and project["papers"][key].get("pdf") != destination.relative_to(ROOT).as_posix():
+            sys.exit(f"论文短名冲突: {key}")
+    for destination, source in planned.items():
+        if destination != source:
+            shutil.copyfile(source, destination)
+        if tei_text is not None:
+            _register_paper(project, key, destination, tei_text, activate=False)
+    print(f"已导入 {len(planned)} 篇 PDF 到 data/seed_papers；未请求服务或构建表格。")
+    print("生成矩阵：python matrix_tool.py build")
+
+
+def cmd_add(args):
+    print("add 已改为仅导入；推荐使用 import。导入后运行 build 统一生成。")
+    if not args.pdf:
+        sys.exit("仅有 TEI 无法进入 PDF 构建范围；请提供对应 PDF，再用 import PDF --from-tei TEI")
+    args.files = [args.pdf]
+    args.replace = args.force
+    cmd_import_papers(args)
 
 
 def cmd_rebuild(args):
-    project = load_project()
-    rebuild_all(project, no_translate=args.no_translate, window=_cli_window(args),
-                relabel=args.relabel, no_llm=args.no_llm)
+    if args.relabel or _cli_window(args) is not None:
+        sys.exit("rebuild 已退役为离线导出兼容入口；重算标签或上下文请使用 build --relabel / --window")
+    print("rebuild 兼容入口：现在仅离线导出。自动构建请使用 build；离线导出请使用 export。")
+    cmd_export_snapshot(args)
+
+
+def cmd_cache(args):
+    project = ensure_project()
+    active = set(project["paper_order"])
+    keys = set(project["papers"])
+    for path in PAPERS_STATE_DIR.iterdir():
+        if path.name.endswith(".tei.xml"):
+            keys.add(path.name[:-8])
+        elif path.suffix == ".json":
+            keys.add(path.stem)
+    if args.action != "clean":
+        print(f"解析缓存登记 {len(keys)} 篇；当前矩阵 {len(active)} 篇。缓存不会自动删除。")
+        for key in sorted(keys):
+            print(f"  {key} {'当前使用' if key in active else '历史/待构建'}")
+        print("预览历史缓存清理：cache clean；确认执行：cache clean --apply")
+        return
+    selected = keys if args.all else {k for k in keys if k not in active and not (
+        project["papers"].get(k, {}).get("pdf") and (ROOT / project["papers"][k]["pdf"]).is_file())}
+    planned = []
+    for key in sorted(selected):
+        for suffix in (".tei.xml", ".json"):
+            target = (PAPERS_STATE_DIR / f"{key}{suffix}").resolve()
+            if not target.is_relative_to(PAPERS_STATE_DIR.resolve()):
+                sys.exit(f"缓存路径越界，拒绝清理: {key}")
+            if target.is_file():
+                planned.append(target)
+    print(f"清理预览：{len(planned)} 个解析文件；PDF、论文短名登记、译文池和人工覆盖保留。")
+    if not args.apply:
+        print("未删除文件。确认执行请加 --apply；--all 会包含当前使用的解析缓存。")
+        return
+    for path in planned:
+        path.unlink()
+    print("缓存清理完成；下次 build 会按当前 PDF 自动补建。")
 
 
 def cmd_remove(args):
-    project = load_project()
-    key = args.key
-    if key not in project["papers"]:
-        sys.exit(f"未注册的种子论文: {key}（现有: {', '.join(project['paper_order'])}）")
-    del project["papers"][key]
-    if key in project["paper_order"]:
-        project["paper_order"].remove(key)
-    write_json(CONFIG_DIR / "project.json", project)
-    for suffix in (".tei.xml", ".json"):
-        p = PAPERS_STATE_DIR / f"{key}{suffix}"
-        p.unlink(missing_ok=True)
-    print(f"已注销种子论文 {key} 并删除其状态文件")
-    rebuild_all(project)
+    sys.exit("remove 已退役：移出 seed_papers 的 PDF 后运行 build 即可移出矩阵；"
+             "缓存由 cache clean --apply 显式清理，不会自动删除。")
 
 
 def cmd_status(args):
+    pdfs = [p for p in INPUT_SEED_DIR.glob("*") if p.is_file() and p.suffix.lower() == ".pdf"]
+    if not (CONFIG_DIR / "project.json").exists():
+        print(f"新项目：seed_papers 有 {len(pdfs)} 篇 PDF；运行 build 自动完成初始化和构建。")
+        return
     project = load_project()
+    print(f"当前 PDF 输入: {len(pdfs)} 篇；以下为最近构建快照，build 才同步范围。")
     print(f"输出文件: {project.get('output_path')} | GROBID: {load_grobid_url(project) or '未配置'}")
     print(f"种子论文 {len(project['paper_order'])} 篇:")
     for key in project["paper_order"]:
@@ -2173,7 +2297,10 @@ def cmd_status(args):
     if inactive:
         print(f"另保留 {inactive} 篇历史论文缓存，不参与当前矩阵。")
 
-    rows = sort_rows(compute_rows(papers_data_fresh(project), load_fixes()))
+    available = snapshot_data(project, strict=False)
+    if len(available) < len(project["paper_order"]):
+        print(f"缺少 {len(project['paper_order']) - len(available)} 篇 JSON 快照，请运行 build 自动补建。")
+    rows = sort_rows(compute_rows(available, load_fixes()))
     trans = load_pool()
     rules = load_rules()
     n_missing = sum(1 for r in rows for info in r["per_paper"].values()
@@ -2192,7 +2319,7 @@ def cmd_status(args):
     print(f"\n当前表格: {len(rows)} 行（有上下文 {n_ctx} 行）| "
           f"缺译 {len(uniq_missing)} 句 | 缺简写 {len(no_abbrev)} 行")
     print(f"关系标签: 单元格 {label_total} | 人工覆盖 {label_manual} | "
-          f"待复核 {label_review} | 未分类 {label_missing}")
+          f"可选复核 {label_review} | 未分类 {label_missing}")
     if no_abbrev:
         print("  缺简写行（可在 data/config/abbrev_rules.json 增补）:")
         for t in no_abbrev[:10]:
@@ -2209,130 +2336,98 @@ def cmd_status(args):
 # 与 main() 里的子命令注册同源；加新命令时同步在此登记，离线可用、不读 README/AGENTS。
 COMMANDS_HELP = {
     "build": {
-        "usage": "matrix_tool.py build [--input-dir 文件夹] [--keep-existing] [--no-llm] [--no-translate] [--window N] [--relabel]",
-        "desc": "以当前 PDF 文件夹同步矩阵范围，增量解析 → 关系标签 → 翻译 → 统一导出一次 xlsx。",
-        "args": [
-            "--input-dir    PDF 文件夹（默认 data/seed_papers，只扫描本层，包含 .PDF）",
-            "--keep-existing 累加模式：保留当前文件夹之外已参与矩阵的论文",
-            "--no-llm       跳过模型关系分类和翻译，复用缓存与人工结果后直接出表",
-            "--no-translate 跳过自动翻译；关系标签仍按配置执行",
-            "--relabel      强制重算非人工关系标签，不强制重新解析 PDF",
-            "--window N     引用句前后各 N 句；也支持 --window-before / --window-after",
-        ],
+        "usage": "matrix_tool.py build [--no-llm] [--no-translate] [--relabel] [--window N]",
+        "desc": "唯一自动构建入口：只扫描 data/seed_papers 的 PDF，复用有效 TEI，关系标签 → 自动翻译 → 出表。",
+        "args": ["--no-llm       暂时跳过分类和翻译，复用缓存及人工结果后出表",
+                 "--no-translate 仅跳过翻译", "--relabel      重算非人工标签",
+                 "--window N     引用句前后各 N 句；也支持 --window-before / --window-after"],
         "example": "python matrix_tool.py build",
-        "notes": "首次自动创建配置；原文未变且 TEI 存在时复用缓存，无需 GROBID。"
-                 "旧记录没有 PDF 哈希时会重新解析一次。移走 PDF 后，该论文不再参与本轮矩阵，缓存保留。"
-                 "解析失败时保留成功结果并返回失败状态，可再次 build 续跑。",
+        "notes": "没有目录外累加选项。移走 PDF 后旧论文退出矩阵，缓存不自动删除。"
+                 "输出缺失会缩小批次、扩大预算并有限补试；低置信标签自动检查，残留不确定项仅供可选复核，不阻断出表。",
+    },
+    "import": {
+        "usage": "matrix_tool.py import PDF或文件夹 [更多PDF] [--from-tei XML] [--key KEY] [--replace]",
+        "desc": "只导入：把外部 PDF 复制到 data/seed_papers，可附带现成 TEI；不请求服务、不构建。",
+        "args": ["--from-tei  单篇 PDF 对应的现成 TEI，供 build 离线复用",
+                 "--key       单篇带 TEI 导入时指定短名", "--replace   允许替换同名 PDF"],
+        "example": "python matrix_tool.py import 下载目录/论文.pdf",
+        "notes": "已经手动放好 PDF 时完全不需要 import。导入后统一运行 build。",
+    },
+    "export": {
+        "usage": "matrix_tool.py export [--output 文件.xlsx]",
+        "desc": "离线导出最近构建的 JSON 快照；不扫描 PDF、不抽取 TEI、不调用模型。",
+        "args": ["--output  另存到指定位置；默认使用项目输出路径"],
+        "example": "python matrix_tool.py export",
+        "notes": "适用于重新生成丢失的 Excel、调整标题/简写显示、另存文件；新增论文或重新处理内容用 build。",
+    },
+    "status": {
+        "usage": "matrix_tool.py status", "desc": "只读查看当前 PDF、最近构建快照、缓存、缺译和可选复核项。",
+        "args": [], "example": "python matrix_tool.py status", "notes": "不请求服务，不改变矩阵范围。",
+    },
+    "cache": {
+        "usage": "matrix_tool.py cache [list|clean] [--all] [--apply]",
+        "desc": "查看或手动清理解析缓存；clean 默认仅预览。",
+        "args": ["clean      默认选择不再使用且 PDF 已移走的历史缓存",
+                 "--all      清理范围包含当前使用的 TEI/JSON", "--apply    执行删除；不加时仅预览"],
+        "example": "python matrix_tool.py cache clean",
+        "notes": "只清理解析文件，PDF、论文短名登记、译文池、人工覆盖均保留；下次 build 可自动补建。",
     },
     "init": {
         "usage": "matrix_tool.py init [--force] [--migrate-legacy]",
-        "desc": "创建空项目，无需旧论文、TEI 或网络；通常无需单独运行，build/add 会自动初始化。",
-        "args": [
-            "--force    补齐缺失配置，保留已有论文、配置、人工规则和缓存",
-            "--migrate-legacy  显式迁移旧三篇种子论文并重建对账，需相应旧 TEI",
-        ],
-        "example": "matrix_tool.py init",
-        "notes": "默认只创建配置，不解析 PDF、不生成空表。--migrate-legacy --force 会替换论文登记表，"
-                 "仅用于恢复旧迁移；规则、人工覆盖和译文池保留。",
-    },
-    "add": {
-        "usage": "matrix_tool.py add 新论文.pdf [--key KEY] [--force] [--from-tei 现成.tei.xml] [--no-llm] [--no-translate] [--window N] [--relabel]",
-        "desc": "加一篇新种子论文：解析（或离线 TEI）→ 注册 → 抽取 → 关系标签 → 翻译 → 重建表格。",
-        "args": [
-            "pdf            种子论文 PDF（--from-tei 时可省略）",
-            "--key KEY      论文短名（默认取 PDF 文件名）",
-            "--force        key 已存在时强制重新解析覆盖",
-            "--from-tei     离线入口：直接使用现成 TEI XML，跳过 GROBID",
-            "--no-llm       跳过模型关系分类和翻译，保留缓存与人工结果",
-            "--no-translate 跳过自动翻译缺译句（默认自动翻译）",
-            "--relabel      强制重新分类全部非人工关系标签",
-            "--window N     上下文窗口：前后各 N 句（0=只显示引用句）",
-            "--window-before / --window-after  分别指定前后句数",
-        ],
-        "example": "matrix_tool.py add data/seed_papers/新论文.pdf",
-        "notes": "需连校园 VPN 使 GROBID 可达；无 VPN 可用 --from-tei 加论文 / 冒烟测试。",
-    },
-    "rebuild": {
-        "usage": "matrix_tool.py rebuild [--no-llm] [--no-translate] [--window N] [--window-before N] [--window-after N] [--relabel]",
-        "desc": "全量重建：抽取 → 排序 → 关系标签 → 自动翻译 → 写 xlsx；只处理新增或失效缓存。",
-        "args": [
-            "--no-llm       跳过模型关系分类和翻译，仅使用当前矩阵范围的 TEI、缓存与人工结果",
-            "--no-translate 跳过自动翻译缺译句（默认自动翻译）",
-            "--window N     上下文窗口：前后各 N 句（覆盖 config，0=只显示引用句）",
-            "--window-before / --window-after  分别指定前后句数",
-            "--relabel      强制重新分类全部非人工关系标签",
-        ],
-        "example": "matrix_tool.py rebuild",
-        "notes": "只使用已登记论文的 TEI，不扫描新 PDF、不调用 GROBID；新增 PDF 请用 build 或 add。"
-                 "关系标签先于自动翻译；xlsx 只是导出物，永远不要手改。",
-    },
-    "export-untranslated": {
-        "usage": "matrix_tool.py export-untranslated",
-        "desc": "导出缺译句子清单：data/exports/untranslated_<时间戳>.txt（可读版）+ 同名 .json（含 8 位 hash，便于回填）。",
-        "args": [],
-        "example": "matrix_tool.py export-untranslated",
-        "notes": "通常无需手动翻译（add/rebuild 已自动翻）；仅在你想人工精修某句译文时用。",
-    },
-    "import-translations": {
-        "usage": "matrix_tool.py import-translations 文件.json",
-        "desc": "把译文合并进译文池（接受 {hash: 中文} 或 {英文原句: 中文}），并自动 rebuild 回填。",
-        "args": [
-            "file  译文 JSON：{hash: 中文} 或 {英文原句: 中文}（键不动，值改成中文）",
-        ],
-        "example": "matrix_tool.py import-translations data/exports/untranslated_20260905_123634.json",
-        "notes": "用于人工精修/校对：把 export 的 json 里英文值改成中文，键（8 位 hash）保持不变。",
+        "desc": "可选维护：创建空项目；通常 build/import 会自动初始化。",
+        "args": ["--force    补齐缺失配置，保留已有文件", "--migrate-legacy 显式迁移早期三篇种子，需旧 TEI"],
+        "example": "python matrix_tool.py init",
+        "notes": "普通新项目无需单独执行。旧迁移与 --force 同用会替换登记表。",
     },
     "export-labels": {
-        "usage": "matrix_tool.py export-labels [--all]",
-        "desc": "导出关系标签人工校对表（默认仅待复核项，含下拉选项、置信度、需复核和引用段）。",
-        "args": [
-            "--all  导出全部单元格，而不仅是待复核项",
-        ],
-        "example": "matrix_tool.py export-labels",
-        "notes": "人工标签列可填五类标签或“自动”；保存后用 import-labels 回填。",
+        "usage": "matrix_tool.py export-labels [--all]", "desc": "可选导出标签表；默认仅待复核项，不请求模型。",
+        "args": ["--all 导出全部标签"], "example": "python matrix_tool.py export-labels",
+        "notes": "人工修正不是构建前提；需要时仅编辑人工标签列，再 import-labels。",
     },
     "import-labels": {
-        "usage": "matrix_tool.py import-labels 校对表.xlsx",
-        "desc": "导入人工关系标签覆盖并自动 rebuild；非法标签整批拒绝。",
-        "args": [
-            "file  export-labels 导出的 xlsx（只需修改“人工标签”列）",
-        ],
-        "example": "matrix_tool.py import-labels data/exports/relation_labels_20260912_120000.xlsx",
-        "notes": "留空不修改，选择“自动”清除人工覆盖；人工覆盖优先于模型结果。",
+        "usage": "matrix_tool.py import-labels 文件.xlsx", "desc": "可选回填人工标签并离线刷新表格。",
+        "args": ["file 标签表；留空不修改，自动清除覆盖"], "example": "python matrix_tool.py import-labels 校对.xlsx",
+        "notes": "人工覆盖优先，非法标签整批拒绝；不会触发额外模型处理。",
+    },
+    "export-untranslated": {
+        "usage": "matrix_tool.py export-untranslated", "desc": "可选导出残留缺译清单，供排查或人工精修。",
+        "args": [], "example": "python matrix_tool.py export-untranslated",
+        "notes": "build 默认自动补译；服务不可用时再次 build 即可，不要求手工填表。",
+    },
+    "import-translations": {
+        "usage": "matrix_tool.py import-translations 文件.json", "desc": "可选回填人工译文并离线刷新表格。",
+        "args": ["file {hash:中文} 或 {英文句:中文}"], "example": "python matrix_tool.py import-translations 译文.json",
+        "notes": "人工译文保留优先，不会触发额外模型处理。",
+    },
+    "add": {
+        "usage": "matrix_tool.py add PDF [--from-tei XML] [--key KEY] [--force]",
+        "desc": "兼容旧命令，现在只导入，等同 import。", "args": [],
+        "example": "python matrix_tool.py import data/seed_papers/论文.pdf",
+        "notes": "不再单篇构建；导入后运行 build。旧 --force 对应 --replace。",
+    },
+    "rebuild": {
+        "usage": "matrix_tool.py rebuild", "desc": "兼容旧命令，现在仅离线导出快照，等同 export。",
+        "args": [], "example": "python matrix_tool.py export",
+        "notes": "自动翻译、关系标签重算请用 build；--relabel / --window 应交给 build。",
     },
     "remove": {
-        "usage": "matrix_tool.py remove KEY",
-        "desc": "注销某篇种子论文（删其状态文件）并重建——加错了用来纠正。",
-        "args": [
-            "KEY  要注销的种子论文短名（见 status 列表）",
-        ],
-        "example": "matrix_tool.py remove TEST",
-        "notes": "仅删除该篇的 TEI/JSON 状态文件，不动译文池与其他论文。"
-                 "PDF 仍保留，如不想下次 build 重新导入，请将该 PDF 移出扫描文件夹。",
-    },
-    "status": {
-        "usage": "matrix_tool.py status",
-        "desc": "查看现状：种子论文、行数、缺译句、缺简写、关系标签与待复核数量。",
-        "args": [],
-        "example": "matrix_tool.py status",
-        "notes": "改动任何 .py、data/config 或 data/state 后跑一次，确认无回归。",
+        "usage": "matrix_tool.py remove KEY", "desc": "已退役；通过输入文件夹管理矩阵范围。",
+        "args": [], "example": "python matrix_tool.py cache clean",
+        "notes": "移走 PDF 再 build 即退出矩阵；缓存只由 cache clean --apply 显式清理。",
     },
 }
 
-
 COMMAND_GROUPS = [
-    ("日常流程", ["build", "status", "add", "rebuild"]),
-    ("标签与翻译", ["export-labels", "import-labels", "export-untranslated", "import-translations"]),
-    ("维护", ["init", "remove"]),
+    ("日常流程", ["build", "import", "export", "status"]),
+    ("维护", ["cache", "init"]),
+    ("标签与翻译（可选，不影响自动构建）", ["export-labels", "import-labels", "export-untranslated", "import-translations"]),
 ]
 
 HELP_QUICKSTART = [
-    "conda activate matrix",
-    "将论文 PDF 放入 data/seed_papers/（首次请先配置 .env）",
+    "首次配置 .env（GROBID 和模型连接信息）",
+    "将 PDF 放入 data/seed_papers/；也可先用 import 从下载目录导入",
     "python matrix_tool.py build",
-    "python matrix_tool.py status",
-    "python matrix_tool.py export-labels",
-    "python matrix_tool.py import-labels data/exports/relation_labels_时间戳.xlsx",
+    "打开 data/exports/科研矩阵表_AgentMemory.xlsx",
 ]
 
 
@@ -2349,7 +2444,7 @@ def cmd_help(args):
                 info = COMMANDS_HELP[name]
                 print(f"  {name:<20}{info['desc']}")
         print("\n查看命令详情：matrix_tool.py help 命令名")
-        print("示例：matrix_tool.py help rebuild")
+        print("示例：matrix_tool.py help build")
         return
 
     name = args.cmd
@@ -2383,8 +2478,6 @@ def main(argv=None):
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("build", help="扫描文件夹中的 PDF，增量解析并一键生成整张表")
-    p.add_argument("--input-dir", help="PDF 文件夹，默认 data/seed_papers，只扫描本层")
-    p.add_argument("--keep-existing", action="store_true", help="累加模式：保留当前文件夹之外的已登记论文")
     p.add_argument("--no-llm", action="store_true", help="跳过模型关系分类和翻译，复用缓存及人工结果后直接出表")
     p.add_argument("--no-translate", action="store_true", help="跳过自动翻译，关系标签仍按配置执行")
     p.add_argument("--relabel", action="store_true", help="强制重新分类全部非人工关系标签")
@@ -2393,34 +2486,51 @@ def main(argv=None):
     p.add_argument("--window-after", type=int, help="引用句后 N 句")
     p.set_defaults(func=cmd_build)
 
-    p = sub.add_parser("add", help="添加一篇种子论文并重建表格")
-    p.add_argument("--no-llm", action="store_true", help="跳过模型关系分类和翻译，直接出表")
-    p.add_argument("pdf", nargs="?", help="种子论文 PDF（--from-tei 时可省略）")
-    p.add_argument("--key", help="论文短名（默认取 PDF 文件名）")
-    p.add_argument("--force", action="store_true", help="key 已存在时强制重新解析覆盖")
-    p.add_argument("--from-tei", dest="from_tei", help="离线入口：直接使用现成 TEI XML")
+    p = sub.add_parser("import", help="从外部文件或文件夹导入 PDF，可带现成 TEI；不构建")
+    p.add_argument("files", nargs="+", help="一个或多个 PDF / 文件夹")
+    p.add_argument("--from-tei", help="单篇论文对应的 TEI")
+    p.add_argument("--key", help="单篇导入时指定短名（需 --from-tei）")
+    p.add_argument("--replace", action="store_true", help="允许替换标准目录中的同名 PDF")
+    p.set_defaults(func=cmd_import_papers)
+
+    p = sub.add_parser("export", help="仅从最近 JSON 快照离线导出，不抽取或请求模型")
+    p.add_argument("--output", help="另存到指定 xlsx 路径")
+    p.set_defaults(func=cmd_export_snapshot)
+
+    p = sub.add_parser("cache", help="查看缓存，或显式清理解析缓存；默认只预览")
+    p.add_argument("action", nargs="?", choices=("list", "clean"), default="list")
+    p.add_argument("--all", action="store_true", help="清理范围包含当前使用的解析缓存")
+    p.add_argument("--apply", action="store_true", help="执行清理；否则仅预览")
+    p.set_defaults(func=cmd_cache)
+
+    p = sub.add_parser("add", help="兼容入口：等同 import，只导入，不构建")
+    p.add_argument("--no-llm", action="store_true", help="兼容旧参数；导入本来就不请求模型")
+    p.add_argument("pdf", nargs="?", help="待导入 PDF；可另带 --from-tei")
+    p.add_argument("--key", help="带 TEI 导入时指定论文短名")
+    p.add_argument("--force", action="store_true", help="等同 import --replace，允许替换同名 PDF")
+    p.add_argument("--from-tei", dest="from_tei", help="随 PDF 导入现成 TEI XML")
     p.add_argument("--no-translate", action="store_true",
-                   help="跳过自动翻译缺译句（默认自动翻译）")
-    p.add_argument("--window", type=int, help="上下文窗口：前后各 N 句（覆盖 config，0=只显示引用句）")
-    p.add_argument("--window-before", type=int, dest="window_before", help="引用句前 N 句")
-    p.add_argument("--window-after", type=int, dest="window_after", help="引用句后 N 句")
-    p.add_argument("--relabel", action="store_true", help="强制重新分类所有非人工关系标签")
+                   help="兼容旧参数；导入不执行翻译")
+    p.add_argument("--window", type=int, help="兼容旧参数；调整上下文请用 build --window")
+    p.add_argument("--window-before", type=int, dest="window_before", help="兼容旧参数；请交给 build")
+    p.add_argument("--window-after", type=int, dest="window_after", help="兼容旧参数；请交给 build")
+    p.add_argument("--relabel", action="store_true", help="兼容旧参数；重算标签请用 build --relabel")
     p.set_defaults(func=cmd_add)
 
-    p = sub.add_parser("rebuild", help="全量重建表格（关系标签、翻译和导出）")
-    p.add_argument("--no-llm", action="store_true", help="跳过模型关系分类和翻译，离线出表")
+    p = sub.add_parser("rebuild", help="兼容入口：等同 export，仅离线出表")
+    p.add_argument("--no-llm", action="store_true", help="兼容旧参数；快照导出始终离线")
     p.add_argument("--no-translate", action="store_true",
-                   help="跳过自动翻译缺译句（默认自动翻译）")
-    p.add_argument("--window", type=int, help="上下文窗口：前后各 N 句（覆盖 config，0=只显示引用句）")
-    p.add_argument("--window-before", type=int, dest="window_before", help="引用句前 N 句")
-    p.add_argument("--window-after", type=int, dest="window_after", help="引用句后 N 句")
-    p.add_argument("--relabel", action="store_true", help="强制重新分类所有非人工关系标签")
+                   help="兼容旧参数；快照导出不执行翻译")
+    p.add_argument("--window", type=int, help="已迁移至 build --window")
+    p.add_argument("--window-before", type=int, dest="window_before", help="已迁移至 build")
+    p.add_argument("--window-after", type=int, dest="window_after", help="已迁移至 build")
+    p.add_argument("--relabel", action="store_true", help="已迁移至 build --relabel")
     p.set_defaults(func=cmd_rebuild)
 
     p = sub.add_parser("export-untranslated", help="导出缺译句子清单")
     p.set_defaults(func=cmd_export)
 
-    p = sub.add_parser("import-translations", help="回填译文并重建")
+    p = sub.add_parser("import-translations", help="可选回填人工译文并离线刷新表格")
     p.add_argument("file", help="译文 JSON：{hash: 中文} 或 {英文原句: 中文}")
     p.set_defaults(func=cmd_import)
 
@@ -2428,11 +2538,11 @@ def main(argv=None):
     p.add_argument("--all", action="store_true", help="导出全部单元格（默认仅待复核项）")
     p.set_defaults(func=cmd_export_labels)
 
-    p = sub.add_parser("import-labels", help="导入人工关系标签覆盖并重建")
+    p = sub.add_parser("import-labels", help="可选回填人工标签并离线刷新表格")
     p.add_argument("file", help="export-labels 导出的 xlsx")
     p.set_defaults(func=cmd_import_labels)
 
-    p = sub.add_parser("remove", help="注销某篇种子论文并重建")
+    p = sub.add_parser("remove", help="已退役：请通过 PDF 文件夹管理范围，cache 清理缓存")
     p.add_argument("key")
     p.set_defaults(func=cmd_remove)
 
