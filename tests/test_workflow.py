@@ -268,3 +268,26 @@ def test_valid_but_uncertain_mi_is_not_retried_forever(workspace, monkeypatch):
     mt.auto_label_missing(rows, p, client=object())
     assert len(requests) == 2
     assert mt.load_relation_label_cache()[key]["needs_review"]
+
+
+def test_build_progress_shows_stages_without_reference_details(workspace, capsys):
+    mt, calls = workspace
+    put_pdf(mt, "A.pdf")
+    mt.main(["build", "--no-llm"])
+    output = capsys.readouterr().out
+    for stage in range(1, 6):
+        assert f"[{stage}/5]" in output
+    assert "参考文献 1 条" not in output
+
+
+def test_fast_translation_progress_does_not_print_every_sentence(workspace, monkeypatch, capsys):
+    mt, calls = workspace
+    rows = [{"per_paper": {"P": {"blocks": [{"sentences": [
+        {"text": f"This is sentence number {i}."} for i in range(50)]}]}}}]
+    monkeypatch.setattr(mt, "load_translation_cfg", lambda p: {"model": "test", "max_tokens": 100})
+    def create(**kwargs):
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="中文译文"))])
+    fake = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    stats = mt.auto_translate_missing(rows, {}, client=fake)
+    assert stats["translated"] == 50
+    assert capsys.readouterr().out.count("翻译 [") <= 3

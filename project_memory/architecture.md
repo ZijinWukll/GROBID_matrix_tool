@@ -15,3 +15,5 @@ cache 清理仅由用户显式 --apply 执行，目标路径必须位于 papers 
 add/import、rebuild/export 保留兼容映射，remove 不再承担删除状态并构建的混合职责。可选人工导出只读快照，回填后仅离线刷新。
 
 根目录 matrix_tool.py 为薄入口，src/matrix_tool.py 为实现。配置连接信息只来自 .env/环境变量；运行日志不记录论文正文、引用段或译文；私有状态不提交。
+
+终端展示统一为五阶段；长任务按时间节流刷新，详细失败原因即时输出。使用入口见根目录 README，完整语法见 manual_files/commands.md。

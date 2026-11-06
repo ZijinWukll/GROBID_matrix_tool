@@ -33,3 +33,5 @@ cache clean --all --apply 会删除当前 TEI/JSON。PDF、短名及人工数据
 ## 首次配置错误
 
 build/import 自动创建缺失配置；可选 init 创建空项目。普通新项目无需旧 HMARS 等 TEI，也不要用 --migrate-legacy。服务连接只写 .env，不在源码中硬编码。
+
+先用 status 查看状态；完整命令格式见 [命令参考](commands.md)。

@@ -1,8 +1,9 @@
-# 项目记忆索引
+# 项目设计记录
 
-这里保存项目长期有效的架构约定、关键决策与迁移记录，不保存普通对话流水或临时任务笔记。
+使用方法以根目录 [README](../README.md) 和 [命令参考](../manual_files/commands.md) 为准。
 
-- `architecture.md`：数据流、事实源和运行边界。
-- `decisions.md`：影响长期维护的结构性决策。
-- `migration_20260910.md`：本次目录重构的映射与验收记录。
-- `archive/`：不再参与日常流程、但需要保留的历史文件。
+- [architecture.md](architecture.md)：当前目录、数据流和职责。
+- [design_20261106.md](design_20261106.md)：当前命令分工与自动处理边界。
+- [decisions.md](decisions.md)：按时间保留的决策；新条目替代旧条目。
+- [migration_20260910.md](migration_20260910.md)：历史迁移记录，不是现行操作指南。
+- archive/：本机历史材料，不参与构建。

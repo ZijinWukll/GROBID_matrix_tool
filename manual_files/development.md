@@ -40,3 +40,5 @@ python -m pytest -q
 ## 隐私与提交
 
 `data/config` 真实配置、`data/state`、种子 PDF、导出物、`.env`、日志和回归基线均不提交。提交前检查 `git status --short`，不要使用 `git add -f` 添加被忽略文件。
+
+临时测试目录、.pytest_cache 和 __pycache__ 可清理；保留 tests 源码、研究状态及私有基线。测试临时目录建议放在系统临时位置，避免复制研究数据堆积在项目根。

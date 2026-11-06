@@ -54,3 +54,20 @@ def test_help_init_explains_empty_project_and_legacy_migration(capsys) -> None:
     output = capsys.readouterr().out
     assert "空项目" in output
     assert "--migrate-legacy" in output
+
+
+def test_build_help_has_complete_command_syntax(capsys):
+    from src import matrix_tool as mt
+    mt.main(["help", "build"])
+    output = capsys.readouterr().out
+    assert "用法：python matrix_tool.py build" in output
+    for flag in ("--window-before N", "--window-after N", "--window N", "--no-llm", "--relabel"):
+        assert flag in output
+
+
+def test_import_help_quotes_paths_and_explains_multiple_inputs(capsys):
+    from src import matrix_tool as mt
+    mt.main(["help", "import"])
+    output = capsys.readouterr().out
+    assert '[更多路径...]' in output
+    assert '"下载目录/论文.pdf"' in output

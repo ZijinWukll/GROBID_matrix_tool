@@ -936,23 +936,21 @@ def parse_relation_label_import(path: Path, current_overrides: dict) -> dict:
     return updated
 
 
+def print_progress(label, current, total, last_time=0):
+    """首项、末项或每十秒更新一次。"""
+    now = time.monotonic()
+    if current == 1 or current == total or now - last_time >= 10:
+        print(f"  {label} [{current}/{total}] ...", flush=True)
+        return now
+    return last_time
+
+
 def print_render_summary(stats: dict):
-    print(f"  行数: {stats['rows']} | 简写: 规则命中 {stats['rule_hits']}, "
-          f"自动提取 {stats['auto_hits']}, 缺 {len(stats['no_abbrev'])}")
-    if "label_auto_count" in stats:
-        print(f"  关系标签: 自动 {stats.get('label_auto_count', 0)}, "
-              f"人工 {stats.get('label_manual_count', 0)}, "
-              f"可选复核 {stats.get('label_needs_review', 0)}, "
-              f"失败兜底 {stats.get('label_failed', 0)}")
-    if stats["missing_trans"]:
-        print(f"  [缺译] {len(stats['missing_trans'])} 句先显示英文原文，"
-              f"服务恢复后再次 build 会自动补齐；人工精修仅为可选操作")
-    if stats["no_abbrev"]:
-        show = "；".join(t[:40] for t in stats["no_abbrev"][:5])
-        more = " 等" if len(stats["no_abbrev"]) > 5 else ""
-        print(f"  [无专用简写] {len(stats['no_abbrev'])} 行（{show}{more}），"
-              f"不影响构建，可选自定义显示规则")
-    print(f"  已写出: {stats['out_path']}")
+    print(f"完成：{stats['rows']} 行 | 缺译 {len(stats['missing_trans'])} 句"
+          + (f" | 可选复核 {stats['label_needs_review']} 项" if 'label_needs_review' in stats else ''))
+    if stats['missing_trans']:
+        print("提示：缺译暂留英文，下次 build 自动补齐。")
+    print(f"输出：{stats['out_path']}")
 
 
 # ----------------------------------------------------------------- 配置/状态
@@ -1383,16 +1381,15 @@ def auto_label_missing(rows: list, project: dict, quiet: bool = False,
         batch_size = max(1, int(cfg.get("batch_size", 8)))
         batch_total = (len(pending) + batch_size - 1) // batch_size
         if not quiet:
-            print(f"关系分类：待处理 {len(pending)} 格，共 {batch_total} 批；"
-                  f"单次读取超时 {cfg.get('timeout', 60)} 秒；缺失输出自动补试，网络错误不逐条重试。", flush=True)
+            print(f"  待处理 {len(pending)} 格，共 {batch_total} 批", flush=True)
         try:
             llm_client = client or build_llm_client(cfg)
             empty_batches = 0
+            progress_at = 0
             for start in range(0, len(pending), batch_size):
                 batch = pending[start:start + batch_size]
                 if not quiet:
-                    print(f"  关系分类 [{start // batch_size + 1}/{batch_total}] "
-                          f"已处理 {completed}/{len(pending)} 格 ...", flush=True)
+                    progress_at = print_progress("关系分类", start // batch_size + 1, batch_total, progress_at)
                 results = classify_with_recovery(batch, cfg, llm_client)
                 for item in batch:
                     record(item, results.get(item["id"]))
@@ -1431,8 +1428,8 @@ def auto_label_missing(rows: list, project: dict, quiet: bool = False,
         "service_unavailable": service_unavailable,
     }
     if not quiet:
-        print(f"  关系标签: 自动 {auto_count}（缓存 {cached_count}, 新分类 {classified}）, "
-              f"人工 {manual_count}, 可选复核 {needs_review}, 失败兜底 {failed}")
+        print(f"  标签：复用 {cached_count} 格，更新 {classified} 格"
+              + (f"，未完成 {failed} 格" if failed else ""))
     return stats
 
 
@@ -1508,8 +1505,7 @@ def auto_translate_missing(rows: list, project: dict, quiet: bool = False,
                 "quota_hit": False}
 
     if not quiet:
-        print(f"  自动翻译: 发现 {len(missing)} 句缺译，使用本地模型 "
-              f"{cfg['model']} 开始翻译 ...")
+        print(f"  待翻译 {len(missing)} 句", flush=True)
     limit = max(1, int(cfg.get("max_per_run", 500)) or len(missing))
     translated = failed = 0
     delay = cfg.get("delay", 0.0)
@@ -1518,10 +1514,10 @@ def auto_translate_missing(rows: list, project: dict, quiet: bool = False,
     try:
         llm_client = client or build_llm_client(cfg)
         empty_results = 0
+        progress_at = 0
         for h, s in missing:
             if not quiet:
-                print(f"  翻译 [{attempted + 1}/{len(missing)}] "
-                      f"已完成 {translated} 句 ...", flush=True)
+                progress_at = print_progress("翻译", attempted + 1, len(missing), progress_at)
             attempted += 1
             try:
                 request_cfg = dict(cfg)
@@ -1576,38 +1572,37 @@ def rebuild_all(project: dict, quiet: bool = False, no_translate: bool = False,
     window=(before, after) 覆盖上下文窗口；None 时读 project.json 的 context_window。
     """
     if not quiet:
-        print("重新抽取全部种子论文 ...")
-    papers_data = papers_data_fresh(project, quiet=quiet, window=window)
+        print("[2/5] 提取引用", flush=True)
+    papers_data = papers_data_fresh(project, quiet=True, window=window)
     for key, data in papers_data.items():
         write_json(PAPERS_STATE_DIR / f"{key}.json",
                    {"schema_version": PAPERS_SCHEMA_VERSION, "key": key,
                     "refs_meta": data["refs_meta"], "contexts": data["contexts"]})
     rows = sort_rows(compute_rows(papers_data, load_fixes()))
     if not quiet:
-        print(f"抽取完成：{len(papers_data)} 篇论文，合并为 {len(rows)} 行。", flush=True)
+        print(f"  {len(papers_data)} 篇论文 → {len(rows)} 行", flush=True)
+        print("[3/5] 关系分类", flush=True)
     if no_llm:
         label_stats = {"labels": effective_relation_labels(rows, project)}
         if not quiet:
-            print("已跳过模型分类与翻译，复用有效缓存和人工结果；缺失内容标记待复核或显示英文。", flush=True)
+            print("  已跳过，复用已有标签。", flush=True)
     else:
         label_stats = auto_label_missing(rows, project, quiet=quiet, relabel=relabel)
+    if not quiet:
+        print("[4/5] 中文翻译", flush=True)
     if not no_translate and not no_llm and not label_stats.get("service_unavailable"):
         auto_translate_missing(rows, project, quiet=quiet)
     elif label_stats.get("service_unavailable") and not no_translate and not quiet:
-        print("模型分类请求已失败，本轮跳过自动翻译，避免再次等待同一服务。", flush=True)
+        print("  模型服务异常，已跳过。", flush=True)
+    elif not quiet:
+        print("  已跳过，复用已有译文。", flush=True)
     if not quiet:
-        print("正在写入 Excel ...", flush=True)
+        print("[5/5] 写入 Excel", flush=True)
     stats = render_xlsx(rows, project, label_stats.get("labels", {}))
     stats.update({f"label_{k}": v for k, v in label_stats.items() if k != "labels"})
     if not quiet:
-        print("全表重建完成:")
         print_render_summary(stats)
     return rows, stats
-
-
-def rows_for_diff(project: dict) -> dict:
-    rows = sort_rows(compute_rows(papers_data_fresh(project), load_fixes()))
-    return {r["id"]: r for r in rows}
 
 
 # ----------------------------------------------------------------- GROBID 客户端
@@ -1844,7 +1839,7 @@ def cmd_migrate_legacy(args):
     print_render_summary(stats)
     if not ok:
         sys.exit("[FAIL] 对账未通过，请检查上方差异")
-    print("\ninit 完成。以后加新种子论文: python matrix_tool.py add 新论文.pdf")
+    print("\ninit 完成。以后更新矩阵: python matrix_tool.py build")
 
 
 def self_check(rows_sorted: list) -> bool:
@@ -1985,7 +1980,7 @@ def cmd_build(args):
         sys.exit(f"PDF 文件夹不存在: {source} —— 请先创建文件夹并放入 PDF")
     pdfs = sorted((p for p in source.iterdir() if p.is_file() and p.suffix.lower() == ".pdf"),
                   key=lambda p: p.name.casefold())
-    print(f"扫描 PDF 文件夹: {source}（本层 {len(pdfs)} 篇）")
+    print(f"[1/5] 扫描 PDF：{len(pdfs)} 篇（data/seed_papers）", flush=True)
     # 优先按归档路径匹配，保留原 add --key 的自定义短名。
     registered = {}
     for key, info in project["papers"].items():
@@ -2023,7 +2018,7 @@ def cmd_build(args):
     base = _check_grobid(project) if pending else None
     failed = []
     for index, (key, pdf) in enumerate(pending, start=1):
-        print(f"[{index}/{len(pending)}] 解析 {pdf.name} ...", flush=True)
+        print(f"  解析 [{index}/{len(pending)}] {pdf.name}", flush=True)
         try:
             tei_text = grobid_fulltext(base, pdf)
             _register_paper(project, key, pdf, tei_text)
@@ -2040,7 +2035,8 @@ def cmd_build(args):
         excluded = [k for k in original_order if k not in active_order]
         project["paper_order"] = active_order
         write_json(CONFIG_DIR / "project.json", project)
-        print(f"矩阵范围：{len(active_order)} 篇；本次排除旧论文 {len(excluded)} 篇（缓存与人工数据保留）。", flush=True)
+        if excluded:
+            print(f"  移出矩阵 {len(excluded)} 篇，缓存保留。", flush=True)
         rebuild_all(project, no_translate=args.no_translate, window=_cli_window(args),
                     relabel=args.relabel, no_llm=args.no_llm)
     if failed:
@@ -2334,88 +2330,84 @@ def cmd_status(args):
 
 # ------------------------------------------------------------- 项目专属 help（中文）
 # 与 main() 里的子命令注册同源；加新命令时同步在此登记，离线可用、不读 README/AGENTS。
-COMMANDS_HELP = {
-    "build": {
-        "usage": "matrix_tool.py build [--no-llm] [--no-translate] [--relabel] [--window N]",
-        "desc": "唯一自动构建入口：只扫描 data/seed_papers 的 PDF，复用有效 TEI，关系标签 → 自动翻译 → 出表。",
-        "args": ["--no-llm       暂时跳过分类和翻译，复用缓存及人工结果后出表",
-                 "--no-translate 仅跳过翻译", "--relabel      重算非人工标签",
-                 "--window N     引用句前后各 N 句；也支持 --window-before / --window-after"],
-        "example": "python matrix_tool.py build",
-        "notes": "没有目录外累加选项。移走 PDF 后旧论文退出矩阵，缓存不自动删除。"
-                 "输出缺失会缩小批次、扩大预算并有限补试；低置信标签自动检查，残留不确定项仅供可选复核，不阻断出表。",
-    },
-    "import": {
-        "usage": "matrix_tool.py import PDF或文件夹 [更多PDF] [--from-tei XML] [--key KEY] [--replace]",
-        "desc": "只导入：把外部 PDF 复制到 data/seed_papers，可附带现成 TEI；不请求服务、不构建。",
-        "args": ["--from-tei  单篇 PDF 对应的现成 TEI，供 build 离线复用",
-                 "--key       单篇带 TEI 导入时指定短名", "--replace   允许替换同名 PDF"],
-        "example": "python matrix_tool.py import 下载目录/论文.pdf",
-        "notes": "已经手动放好 PDF 时完全不需要 import。导入后统一运行 build。",
-    },
-    "export": {
-        "usage": "matrix_tool.py export [--output 文件.xlsx]",
-        "desc": "离线导出最近构建的 JSON 快照；不扫描 PDF、不抽取 TEI、不调用模型。",
-        "args": ["--output  另存到指定位置；默认使用项目输出路径"],
-        "example": "python matrix_tool.py export",
-        "notes": "适用于重新生成丢失的 Excel、调整标题/简写显示、另存文件；新增论文或重新处理内容用 build。",
-    },
-    "status": {
-        "usage": "matrix_tool.py status", "desc": "只读查看当前 PDF、最近构建快照、缓存、缺译和可选复核项。",
-        "args": [], "example": "python matrix_tool.py status", "notes": "不请求服务，不改变矩阵范围。",
-    },
-    "cache": {
-        "usage": "matrix_tool.py cache [list|clean] [--all] [--apply]",
-        "desc": "查看或手动清理解析缓存；clean 默认仅预览。",
-        "args": ["clean      默认选择不再使用且 PDF 已移走的历史缓存",
-                 "--all      清理范围包含当前使用的 TEI/JSON", "--apply    执行删除；不加时仅预览"],
-        "example": "python matrix_tool.py cache clean",
-        "notes": "只清理解析文件，PDF、论文短名登记、译文池、人工覆盖均保留；下次 build 可自动补建。",
-    },
-    "init": {
-        "usage": "matrix_tool.py init [--force] [--migrate-legacy]",
-        "desc": "可选维护：创建空项目；通常 build/import 会自动初始化。",
-        "args": ["--force    补齐缺失配置，保留已有文件", "--migrate-legacy 显式迁移早期三篇种子，需旧 TEI"],
-        "example": "python matrix_tool.py init",
-        "notes": "普通新项目无需单独执行。旧迁移与 --force 同用会替换登记表。",
-    },
-    "export-labels": {
-        "usage": "matrix_tool.py export-labels [--all]", "desc": "可选导出标签表；默认仅待复核项，不请求模型。",
-        "args": ["--all 导出全部标签"], "example": "python matrix_tool.py export-labels",
-        "notes": "人工修正不是构建前提；需要时仅编辑人工标签列，再 import-labels。",
-    },
-    "import-labels": {
-        "usage": "matrix_tool.py import-labels 文件.xlsx", "desc": "可选回填人工标签并离线刷新表格。",
-        "args": ["file 标签表；留空不修改，自动清除覆盖"], "example": "python matrix_tool.py import-labels 校对.xlsx",
-        "notes": "人工覆盖优先，非法标签整批拒绝；不会触发额外模型处理。",
-    },
-    "export-untranslated": {
-        "usage": "matrix_tool.py export-untranslated", "desc": "可选导出残留缺译清单，供排查或人工精修。",
-        "args": [], "example": "python matrix_tool.py export-untranslated",
-        "notes": "build 默认自动补译；服务不可用时再次 build 即可，不要求手工填表。",
-    },
-    "import-translations": {
-        "usage": "matrix_tool.py import-translations 文件.json", "desc": "可选回填人工译文并离线刷新表格。",
-        "args": ["file {hash:中文} 或 {英文句:中文}"], "example": "python matrix_tool.py import-translations 译文.json",
-        "notes": "人工译文保留优先，不会触发额外模型处理。",
-    },
-    "add": {
-        "usage": "matrix_tool.py add PDF [--from-tei XML] [--key KEY] [--force]",
-        "desc": "兼容旧命令，现在只导入，等同 import。", "args": [],
-        "example": "python matrix_tool.py import data/seed_papers/论文.pdf",
-        "notes": "不再单篇构建；导入后运行 build。旧 --force 对应 --replace。",
-    },
-    "rebuild": {
-        "usage": "matrix_tool.py rebuild", "desc": "兼容旧命令，现在仅离线导出快照，等同 export。",
-        "args": [], "example": "python matrix_tool.py export",
-        "notes": "自动翻译、关系标签重算请用 build；--relabel / --window 应交给 build。",
-    },
-    "remove": {
-        "usage": "matrix_tool.py remove KEY", "desc": "已退役；通过输入文件夹管理矩阵范围。",
-        "args": [], "example": "python matrix_tool.py cache clean",
-        "notes": "移走 PDF 再 build 即退出矩阵；缓存只由 cache clean --apply 显式清理。",
-    },
-}
+COMMANDS_HELP = {'build': {'usage': 'matrix_tool.py build [--no-llm] [--no-translate] [--relabel]\n'
+                    '    [--window N] [--window-before N] [--window-after N]',
+           'desc': '自动提取引用、生成关系标签、自动翻译并出表。',
+           'args': ['--no-llm       暂时跳过分类和翻译，复用缓存及人工结果后出表',
+                    '--no-translate 仅跳过翻译',
+                    '--relabel      重算非人工标签',
+                    '--window N     前后各 N 句（0=只取引用句）',
+                    '--window-before N / --window-after N  单独设置前后句数'],
+           'example': 'python matrix_tool.py build',
+           'notes': '只纳入 data/seed_papers/ 中的 PDF；有效缓存复用，历史缓存保留。'},
+ 'import': {'usage': 'matrix_tool.py import <PDF或文件夹> [更多路径...]\n'
+                     '    [--from-tei XML] [--key KEY] [--replace]',
+            'desc': '把外部 PDF 放入标准目录，可附带 TEI；不构建。',
+            'args': ['--from-tei  单篇 PDF 对应的现成 TEI，供 build 离线复用',
+                     '--key       单篇带 TEI 导入时指定短名',
+                     '--replace   允许替换同名 PDF'],
+            'example': 'python matrix_tool.py import "下载目录/论文.pdf"',
+            'notes': '已手动放好 PDF 时无需导入。--from-tei 和 --key 仅用于单篇。',
+            'examples': ['python matrix_tool.py import "下载目录/论文.pdf"',
+                         'python matrix_tool.py import "下载目录"',
+                         'python matrix_tool.py import "论文.pdf" --from-tei "论文.tei.xml"']},
+ 'export': {'usage': 'matrix_tool.py export [--output 文件.xlsx]',
+            'desc': '从最近 JSON 快照离线出表。',
+            'args': ['--output  另存到指定位置；默认使用项目输出路径'],
+            'example': 'python matrix_tool.py export',
+            'notes': '不扫描 PDF、不抽取、不调用模型；新增论文或重新处理内容用 build。'},
+ 'status': {'usage': 'matrix_tool.py status',
+            'desc': '查看输入论文、最近构建结果和待处理数量。',
+            'args': [],
+            'example': 'python matrix_tool.py status',
+            'notes': '只读，不构建。'},
+ 'cache': {'usage': 'matrix_tool.py cache [list]\n    或 python matrix_tool.py cache clean [--all] [--apply]',
+           'desc': '查看解析缓存，或预览、执行清理。',
+           'args': ['clean      默认选择不再使用且 PDF 已移走的历史缓存',
+                    '--all      清理范围包含当前使用的 TEI/JSON',
+                    '--apply    执行删除；不加时仅预览'],
+           'example': 'python matrix_tool.py cache clean',
+           'notes': '--apply 才删除；PDF、短名、译文池和人工结果保留。'},
+ 'init': {'usage': 'matrix_tool.py init [--force] [--migrate-legacy]',
+          'desc': '可选：创建空项目或补齐缺失配置。',
+          'args': ['--force    补齐缺失配置，保留已有文件', '--migrate-legacy 显式迁移早期三篇种子，需旧 TEI'],
+          'example': 'python matrix_tool.py init',
+          'notes': '一般无需运行；旧迁移与 --force 同用会替换登记表。'},
+ 'export-labels': {'usage': 'matrix_tool.py export-labels [--all]',
+                   'desc': '可选导出标签表；默认仅待复核项，不请求模型。',
+                   'args': ['--all 导出全部标签'],
+                   'example': 'python matrix_tool.py export-labels',
+                   'notes': '人工修正不是构建前提；需要时仅编辑人工标签列，再 import-labels。'},
+ 'import-labels': {'usage': 'matrix_tool.py import-labels <标签表.xlsx>',
+                   'desc': '可选回填人工标签并离线刷新表格。',
+                   'args': ['file 标签表；留空不修改，自动清除覆盖'],
+                   'example': 'python matrix_tool.py import-labels 校对.xlsx',
+                   'notes': '人工覆盖优先，非法标签整批拒绝；不会触发额外模型处理。'},
+ 'export-untranslated': {'usage': 'matrix_tool.py export-untranslated',
+                         'desc': '可选导出残留缺译清单，供排查或人工精修。',
+                         'args': [],
+                         'example': 'python matrix_tool.py export-untranslated',
+                         'notes': 'build 默认自动补译；服务不可用时再次 build 即可，不要求手工填表。'},
+ 'import-translations': {'usage': 'matrix_tool.py import-translations <译文.json>',
+                         'desc': '可选回填人工译文并离线刷新表格。',
+                         'args': ['file {hash:中文} 或 {英文句:中文}'],
+                         'example': 'python matrix_tool.py import-translations 译文.json',
+                         'notes': '人工译文保留优先，不会触发额外模型处理。'},
+ 'add': {'usage': 'matrix_tool.py add PDF [--from-tei XML] [--key KEY] [--force]',
+         'desc': '兼容旧命令，现在只导入，等同 import。',
+         'args': [],
+         'example': 'python matrix_tool.py import data/seed_papers/论文.pdf',
+         'notes': '不再单篇构建；导入后运行 build。旧 --force 对应 --replace。'},
+ 'rebuild': {'usage': 'matrix_tool.py rebuild',
+             'desc': '兼容旧命令，现在仅离线导出快照，等同 export。',
+             'args': [],
+             'example': 'python matrix_tool.py export',
+             'notes': '自动翻译、关系标签重算请用 build；--relabel / --window 应交给 build。'},
+ 'remove': {'usage': 'matrix_tool.py remove KEY',
+            'desc': '已退役；通过输入文件夹管理矩阵范围。',
+            'args': [],
+            'example': 'python matrix_tool.py cache clean',
+            'notes': '移走 PDF 再 build 即退出矩阵；缓存只由 cache clean --apply 显式清理。'}}
 
 COMMAND_GROUPS = [
     ("日常流程", ["build", "import", "export", "status"]),
@@ -2444,6 +2436,7 @@ def cmd_help(args):
                 info = COMMANDS_HELP[name]
                 print(f"  {name:<20}{info['desc']}")
         print("\n查看命令详情：matrix_tool.py help 命令名")
+        print("格式：[] 内可省略，<> 内必填；路径含空格时加双引号。")
         print("示例：matrix_tool.py help build")
         return
 
@@ -2457,12 +2450,14 @@ def cmd_help(args):
 
     print(f"命令：{name}")
     print(f"用途：{info['desc']}")
-    print(f"用法：{info['usage']}")
+    print(f"用法：python {info['usage']}")
     if info["args"]:
         print("参数：")
         for a in info["args"]:
             print(f"  {a}")
-    print(f"示例：{info['example']}")
+    print("示例：")
+    for example in info.get("examples", [info["example"]]):
+        print(f"  {example}")
     if info["notes"]:
         print(f"注意：{info['notes']}")
 

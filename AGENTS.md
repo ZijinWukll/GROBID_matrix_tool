@@ -127,3 +127,7 @@ python -m pytest -q
 - 不要使用 `git add -f` 添加被忽略的本地数据。
 - 公开仓库只应包含源码、测试、文档、目录占位、脱敏示例配置和 `requirements*.txt`。
 - 真实 `.env`、PDF、TEI、抽取状态、译文池、标签缓存、人工覆盖、导出物、日志和本机归档均不提交。
+
+## 帮助与展示维护
+
+README 保持快速上手；完整命令格式集中到 manual_files/commands.md，并与 COMMANDS_HELP 同步。构建输出五阶段，长任务约每十秒更新，错误即时显示。整理时仅删除生成的测试临时目录与 Python/pytest 缓存，保留测试源码、私有基线与研究缓存。

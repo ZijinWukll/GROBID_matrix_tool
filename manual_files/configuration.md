@@ -27,3 +27,5 @@ translation 默认 enabled=true、timeout=60、max_tokens=4096、repair_attempts
 abbrev_rules.json 只改变简写显示，display_title_fixes.json 改标题显示，修改后 export 即可；alias_mentions.json 改提及次数与上下文，修改后 build。
 
 人工关系标签在 relation_label_overrides.json，建议通过可选 import-labels 写入。自动分类、自动检查与缓存清理不能覆盖或删除人工结果。译文按英文句子 md5 前 8 位复用，标签按 row_id|paper_key 与内容哈希复用。
+
+命令的完整格式见 [命令参考](commands.md)；第一次配置请先看根目录 README。
